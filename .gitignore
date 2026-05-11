@@ -1,6 +1,7 @@
 data/**
 **/*.ipynb_checkpoints
 **/*__pycache__
+!data/_src
 .vscode/
 CLAUDE.md
 .claude
@@ -8,3 +9,6 @@ CLAUDE.md
 results/
 **/*compile_commands.json
 .cache
+**/*.dSYM
+.sandbox
+.DS_Store
