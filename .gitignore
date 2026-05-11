@@ -12,3 +12,4 @@ results/
 **/*.dSYM
 .sandbox
 .DS_Store
+.ipynb_checkpoints
