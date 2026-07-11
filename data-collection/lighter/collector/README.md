@@ -1,7 +1,7 @@
 ```
 docker run -d \
   --name lighter-collector \
-  -v ~/data:/data \
+  -v ~/backesting/data/lighter:/data \
   -e DATA_ROOT=/data \
   lighter-collector
 ```
