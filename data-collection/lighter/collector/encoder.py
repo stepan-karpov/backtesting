@@ -5,8 +5,7 @@ from pathlib import Path
 
 import zstandard as zstd
 
-DATA_ROOT = "data-collection/lighter/collector/temp"
-
+from settings import DATA_ROOT
 
 def setup_encoder_logger():
   logger = logging.getLogger("encoder")
