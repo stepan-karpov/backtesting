@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import time
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -118,11 +119,16 @@ async def connect_and_run():
       if message_count % 1000 == 0 and count_with_delay > 0:
         avg_delay = total_delay / count_with_delay
         size_mb = get_folder_size_mb(DATA_ROOT)
+        
+        # Получаем свободное место на диске
+        disk = shutil.disk_usage(DATA_ROOT)
+        free_gb = disk.free / (1024 ** 3)
 
         info_logger.info(
           f"Total messages: {message_count} | "
           f"Average delay: {avg_delay:.1f} µs | "
-          f"Data size: {size_mb:.2f} MB"
+          f"Data size: {size_mb:.2f} MB |"
+          f"Free disk: {free_gb:.1f} GB"
         )
         total_delay = 0
         count_with_delay = 0
