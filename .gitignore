@@ -1,7 +1,6 @@
 data/**
 **/*.ipynb_checkpoints
 **/*__pycache__
-!data/_src
 .vscode/
 CLAUDE.md
 .claude
@@ -13,3 +12,6 @@ results/
 .sandbox
 .DS_Store
 .ipynb_checkpoints
+PROJECT_LOG.md
+RISKS.md
+docs/
