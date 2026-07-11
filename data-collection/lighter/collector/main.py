@@ -127,7 +127,7 @@ async def connect_and_run():
         info_logger.info(
           f"Total messages: {message_count} | "
           f"Average delay: {avg_delay:.1f} µs | "
-          f"Data size: {size_mb:.2f} MB |"
+          f"Data size: {size_mb:.2f} MB | "
           f"Free disk: {free_gb:.1f} GB"
         )
         total_delay = 0
