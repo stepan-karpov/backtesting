@@ -1,19 +1,22 @@
-"""Декомпрессия lz4 и склейка путей (один или несколько файлов)."""
+"""Декомпрессия zstd и склейка путей (один или несколько файлов)."""
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from typing import Iterable, Iterator
 
-import lz4.frame
+import zstandard as zstd
 
 
 def iter_lines_one_file(path: Path) -> Iterator[str]:
-    with open(path, "rb") as f:
-        blob = lz4.frame.decompress(f.read())
-    for line in blob.decode().splitlines():
-        if line.strip():
-            yield line
+    # stream_reader (а не decompress(f.read())): файлы сжаты потоково через
+    # copy_stream, размер распакованных данных в кадре может отсутствовать —
+    # тогда однопроходный decompress падает. Плюс не держим файл в памяти.
+    with open(path, "rb") as f, zstd.ZstdDecompressor().stream_reader(f) as reader:
+        for line in io.TextIOWrapper(reader, encoding="utf-8"):
+            if line.strip():
+                yield line.rstrip("\n")
 
 
 def coerce_paths(files: str | Path | Iterable[str | Path]) -> list[Path]:

@@ -1,25 +1,25 @@
-"""Сырой поток строк JSON LOB из lz4."""
+"""Сырой поток lob Lighter: по одному DataFrame на parquet-файл."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Iterable, Iterator
 
-from ._io import coerce_paths, iter_lines_chain
+import pandas as pd
+
+from ._io import coerce_paths
 
 
 class LobReaderRaw:
     """
-    Одна или несколько lz4 с LOB (по строке на снимок в каждом файле).
-
-    ``files`` — строка пути, :class:`~pathlib.Path` или **перечисление** путей
-    (список / кортеж строк); порядок файлов = порядок строк в потоке.
-
-    Итерирует **строки** JSON без парсинга.
+    Один или несколько parquet-файлов lob — итерация по **файлам** подряд
+    (в порядке передачи). Каждый элемент — DataFrame одного файла as-is,
+    без обработки. Склейка — забота основного LobReader.
     """
 
     def __init__(self, files: str | Path | Iterable[str | Path]) -> None:
         self._paths = coerce_paths(files)
 
-    def __iter__(self) -> Iterator[str]:
-        yield from iter_lines_chain(self._paths)
+    def __iter__(self) -> Iterator[pd.DataFrame]:
+        for path in self._paths:
+            yield pd.read_parquet(path)
