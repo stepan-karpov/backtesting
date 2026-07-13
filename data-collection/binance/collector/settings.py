@@ -6,7 +6,7 @@ DATA_ROOT = "/data"
 # Все сверены с fapi/v1/exchangeInfo (contractType=PERPETUAL, status=TRADING,
 # quoteAsset=USDT). Числовых префиксов вида 1000X ни у одного нет.
 SYMBOLS = {
-  "BTC":      "BTCUSDT",
+  # "BTC":      "BTCUSDT",
   "PUMP":     "PUMPUSDT",
   "ADA":      "ADAUSDT",
   "PENGU":    "PENGUUSDT",
