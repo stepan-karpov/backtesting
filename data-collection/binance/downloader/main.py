@@ -7,7 +7,7 @@ REMOTE_USER = "ubuntu"
 REMOTE_HOST = "18.183.168.158"
 
 REMOTE_PATH = "/home/ubuntu/backtesting/data/binance"
-LOCAL_PATH  = "/Users/stepan/Desktop/backtesting/data/binance-raw"
+LOCAL_PATH  = "/Users/stepan/Desktop/backtesting/data/binance"
 # ===================================================
 
 
