@@ -13,15 +13,15 @@
 // Trades-first tie-breaking: at equal timestamps, trades processed before LOB.
 
 class Backtester {
-    int64_t _latency_us;
-    int64_t _log_interval_us;
-    int64_t _quote_log_stride;
+    int64_t latency_us_;
+    int64_t log_interval_us_;
+    int64_t quote_log_stride_;
 
 public:
     Backtester(int64_t latency_us, int64_t log_interval_us, int64_t quote_log_stride)
-        : _latency_us(latency_us)
-        , _log_interval_us(log_interval_us)
-        , _quote_log_stride(quote_log_stride < 1 ? 1 : quote_log_stride)
+        : latency_us_(latency_us)
+        , log_interval_us_(log_interval_us)
+        , quote_log_stride_(quote_log_stride < 1 ? 1 : quote_log_stride)
     {}
 
     RunData run(
@@ -71,17 +71,17 @@ public:
                     else          { new_ha = true; new_a = o; }
                 }
 
-                if (_latency_us == 0) {
+                if (latency_us_ == 0) {
                     has_bid = new_hb; bid_ord = new_b;
                     has_ask = new_ha; ask_ord = new_a;
                 } else {
                     has_pending       = true;
                     pend_bid          = new_hb; pend_bid_o = new_b;
                     pend_ask          = new_ha; pend_ask_o = new_a;
-                    pending_active_at = t_us + _latency_us;
+                    pending_active_at = t_us + latency_us_;
                 }
 
-                if (lob_counter % _quote_log_stride == 0)
+                if (lob_counter % quote_log_stride_ == 0)
                     data.add_quote(t_us,
                                    has_bid, bid_ord.price,
                                    has_ask, ask_ord.price,
@@ -115,7 +115,7 @@ public:
                 trades.advance();
             }
 
-            if (t_us - last_log_us >= _log_interval_us) {
+            if (t_us - last_log_us >= log_interval_us_) {
                 data.add_pnl_snapshot(t_us,
                     cash + inventory * lob.orderbook().mid(), inventory);
                 last_log_us = t_us;
