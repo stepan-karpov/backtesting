@@ -1,2 +1,0 @@
-ticker,ref_price,A_spread_ticks_p50,A_spread_bps_p50,B_as350_hi_bps,B_edge_bps,C_n_trades,C_trades_per_day,C_notional_per_day_usd,D_sweep_share_notional,E_obs_days,E_jumps_gt20bps_per_day,F_top1_maker_share,F_l1_requote_p50_s,G_touch_usd_p50,G_queue_share_p50
-TAO,208.8575,97.0,4.658,0.465,1.847,1768,1103.1,179103.49,0.3268,1.603,1.87,0.3734,0.051,884.3,0.3612

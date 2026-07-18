@@ -15,11 +15,16 @@ class LobReaderRaw:
     Один или несколько parquet-файлов lob — итерация по **файлам** подряд
     (в порядке передачи). Каждый элемент — DataFrame одного файла as-is,
     без обработки. Склейка — забота основного LobReader.
+
+    columns: если задан — читаем только эти колонки (parquet проецирует на
+    уровне I/O, не поднимая всю строку в память). None (по умолчанию) — все.
     """
 
-    def __init__(self, files: str | Path | Iterable[str | Path]) -> None:
+    def __init__(self, files: str | Path | Iterable[str | Path],
+                 columns: list[str] | None = None) -> None:
         self._paths = coerce_paths(files)
+        self._columns = columns
 
     def __iter__(self) -> Iterator[pd.DataFrame]:
         for path in self._paths:
-            yield pd.read_parquet(path)
+            yield pd.read_parquet(path, columns=self._columns)
