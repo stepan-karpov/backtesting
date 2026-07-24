@@ -18,7 +18,7 @@ struct RunData {
 
     std::vector<int64_t> fill_t;
     std::vector<int32_t> fill_side;
-    std::vector<double>  fill_price, fill_size, fill_inv;
+    std::vector<double>  fill_price, fill_size, fill_inv, fill_mid;
 
     void reserve(std::size_t n_lob_hint, std::size_t n_fill_hint) {
         pnl_t.reserve(n_lob_hint / 10);
@@ -29,6 +29,7 @@ struct RunData {
         fill_price.reserve(n_fill_hint);
         fill_size.reserve(n_fill_hint);
         fill_inv.reserve(n_fill_hint);
+        fill_mid.reserve(n_fill_hint);
     }
 
     // ── write API (called by Backtester) ──────────────────────────────────────
@@ -50,19 +51,20 @@ struct RunData {
         qt_mid.push_back(mid);
     }
 
-    void add_fill(int64_t t, const Fill& f, double inv_after) {
+    void add_fill(int64_t t, const Fill& f, double inv_after, double mid_at_fill) {
         fill_t.push_back(t);
         fill_side.push_back(f.side);
         fill_price.push_back(f.price);
         fill_size.push_back(f.size);
         fill_inv.push_back(inv_after);
+        fill_mid.push_back(mid_at_fill);
     }
 
     // ── serialisation ─────────────────────────────────────────────────────────
     // Writes three CSV files:
     //   {prefix}_pnl.csv    — t_us, pnl, inventory
     //   {prefix}_quotes.csv — t_us, bid, ask, mid
-    //   {prefix}_fills.csv  — t_us, side, price, size, inventory
+    //   {prefix}_fills.csv  — t_us, side, price, size, inventory, mid_at_fill
 
     void save_csv(const std::string& prefix) const {
         static const char* SIDES[] = {"bid", "ask", "markout"};
@@ -89,13 +91,14 @@ struct RunData {
         }
         {
             std::ofstream f(prefix + "_fills.csv");
-            f << "t_us,side,price,size,inventory\n";
+            f << "t_us,side,price,size,inventory,mid_at_fill\n";
             for (std::size_t i = 0; i < fill_t.size(); ++i)
                 f << fill_t[i] << ','
                   << SIDES[fill_side[i]] << ','
                   << dbl(fill_price[i]) << ','
                   << dbl(fill_size[i]) << ','
-                  << dbl(fill_inv[i]) << '\n';
+                  << dbl(fill_inv[i]) << ','
+                  << dbl(fill_mid[i]) << '\n';
         }
     }
 };

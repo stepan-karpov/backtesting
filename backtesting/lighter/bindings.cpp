@@ -71,7 +71,8 @@ public:
 // Market data arrives as pre-parsed numpy arrays (see feed.py). The venue-specific
 // parsing lives in Python; the engine only sees normalised columns.
 //
-//   lob_*   : row-major [n_lob, LOB_LEVELS], one snapshot per row
+//   lob_*   : row-major [n_lob, depth], one snapshot per row (depth = book depth
+//             the feed loaded, inferred from the array width, 1..MAX_LOB_LEVELS)
 //   trade_* : flat [n_trade], one trade per row
 //
 // c_style|forcecast guarantees contiguous, correctly-typed buffers (a copy is
@@ -98,14 +99,21 @@ static void run_arrays(
     const int64_t n_lob   = lob_ts.shape(0);
     const int64_t n_trade = trade_ts.shape(0);
 
+    // ── book depth is whatever the feed loaded (array width) ──────────────────
+    if (bid_px.ndim() != 2 || bid_px.shape(0) != n_lob)
+        throw std::runtime_error("run_arrays: bid_px must have shape [n_lob, depth]");
+    const int64_t depth = bid_px.shape(1);
+    if (depth < 1 || depth > MAX_LOB_LEVELS)
+        throw std::runtime_error(
+            "run_arrays: depth must be in [1, " + std::to_string(MAX_LOB_LEVELS) + "]");
+
     // ── shape checks: fail loudly rather than read out of bounds ──────────────
     auto require_lob_grid = [&](const F64Array& a, const char* name) {
-        if (a.ndim() != 2 || a.shape(0) != n_lob || a.shape(1) != LOB_LEVELS)
+        if (a.ndim() != 2 || a.shape(0) != n_lob || a.shape(1) != depth)
             throw std::runtime_error(
-                std::string("run_arrays: ") + name +
-                " must have shape [n_lob, " + std::to_string(LOB_LEVELS) + "]");
+                std::string("run_arrays: ") + name + " must match bid_px shape [n_lob, depth]");
     };
-    require_lob_grid(bid_px, "bid_px"); require_lob_grid(bid_sz, "bid_sz");
+    require_lob_grid(bid_sz, "bid_sz");
     require_lob_grid(ask_px, "ask_px"); require_lob_grid(ask_sz, "ask_sz");
 
     auto require_trade_col = [&](const auto& a, const char* name) {
@@ -124,7 +132,7 @@ static void run_arrays(
     ArrayLobReader lob(
         lob_ts.data(),
         bid_px.data(), bid_sz.data(), ask_px.data(), ask_sz.data(),
-        n_lob);
+        n_lob, static_cast<int>(depth));
     ArrayTradeReader trades(
         trade_ts.data(), trade_is_sell.data(),
         trade_price.data(), trade_size.data(),
@@ -139,7 +147,7 @@ static void run_arrays(
 PYBIND11_MODULE(_engine, m) {
     m.doc() = "C++ backtester engine";
 
-    m.attr("LOB_LEVELS") = LOB_LEVELS;   // book depth the engine expects
+    m.attr("MAX_LOB_LEVELS") = MAX_LOB_LEVELS;   // compile-time cap on book depth
 
     py::class_<OrderBook>(m, "OrderBook")
         .def_property_readonly("best_bid",    &OrderBook::best_bid)
@@ -150,7 +158,8 @@ PYBIND11_MODULE(_engine, m) {
             [](const OrderBook& ob) { return ob.timestamp_us; })
         .def_property_readonly("bids", [](const OrderBook& ob) {
             py::list r;
-            for (const auto& l : ob.bids) {
+            for (int k = 0; k < ob.depth; ++k) {
+                const auto& l = ob.bids[k];
                 py::list row; row.append(l.price); row.append(l.amount);
                 r.append(row);
             }
@@ -158,7 +167,8 @@ PYBIND11_MODULE(_engine, m) {
         })
         .def_property_readonly("asks", [](const OrderBook& ob) {
             py::list r;
-            for (const auto& l : ob.asks) {
+            for (int k = 0; k < ob.depth; ++k) {
+                const auto& l = ob.asks[k];
                 py::list row; row.append(l.price); row.append(l.amount);
                 r.append(row);
             }

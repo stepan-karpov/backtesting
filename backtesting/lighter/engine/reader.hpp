@@ -20,8 +20,8 @@ struct TradeEvent {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ArrayLobReader — walks pre-parsed LOB snapshots. Prices/sizes are row-major
-// with stride = LOB_LEVELS (row i holds level 0..LOB_LEVELS-1); one int64
-// timestamp per row.
+// with stride = depth (row i holds level 0..depth-1); one int64 timestamp per row.
+// depth is the runtime book depth the feed loaded (1..MAX_LOB_LEVELS).
 //
 // Ownership: the arrays are owned by the caller (Python numpy buffers) and must
 // outlive the reader. Nothing is copied except the current row into _ob.
@@ -34,13 +34,14 @@ class ArrayLobReader {
     const double*  _ask_p;
     const double*  _ask_a;
     int64_t        _n;
+    int            _depth;
     int64_t        _i = 0;
 
     OrderBook _ob;
     bool      _valid = false;
 
     void _load(int64_t i) noexcept {
-        const std::size_t off = static_cast<std::size_t>(i) * LOB_LEVELS;
+        const std::size_t off = static_cast<std::size_t>(i) * _depth;
         _ob.refresh(_bid_p + off, _bid_a + off,
                     _ask_p + off, _ask_a + off, _ts[i]);
     }
@@ -49,8 +50,10 @@ public:
     ArrayLobReader(const int64_t* ts,
                    const double* bid_p, const double* bid_a,
                    const double* ask_p, const double* ask_a,
-                   int64_t n)
-        : _ts(ts), _bid_p(bid_p), _bid_a(bid_a), _ask_p(ask_p), _ask_a(ask_a), _n(n) {
+                   int64_t n, int depth)
+        : _ts(ts), _bid_p(bid_p), _bid_a(bid_a), _ask_p(ask_p), _ask_a(ask_a),
+          _n(n), _depth(depth) {
+        _ob.depth = depth;
         _valid = _n > 0;
         if (_valid) _load(0);
     }

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 try:
-    from ._engine import OrderBook, LOB_LEVELS
+    from ._engine import OrderBook, MAX_LOB_LEVELS
 except ImportError:
     raise ImportError(
         "C++ engine not compiled.\n"
@@ -13,4 +13,4 @@ from .strategy import Strategy
 from .backtester import Backtester
 from .feed import LighterFeed
 
-__all__ = ["Strategy", "Backtester", "OrderBook", "LighterFeed", "LOB_LEVELS"]
+__all__ = ["Strategy", "Backtester", "OrderBook", "LighterFeed", "MAX_LOB_LEVELS"]

@@ -105,7 +105,7 @@ public:
                 for (const auto& f : trade_fills) {
                     if (f.side == 0) { cash -= f.price * f.size; inventory += f.size; }
                     else             { cash += f.price * f.size; inventory -= f.size; }
-                    data.add_fill(t_us, f, inventory);
+                    data.add_fill(t_us, f, inventory, ob.mid());
                     strategy.on_fill(t_us, f);
                 }
                 trades.advance();
@@ -121,7 +121,7 @@ public:
         // Final markout — lob.orderbook() retains last valid state
         const double fin_mid = lob.orderbook().mid();
         cash += inventory * fin_mid;
-        data.add_fill(t_us, Fill{2, fin_mid, -inventory}, 0.0);
+        data.add_fill(t_us, Fill{2, fin_mid, -inventory}, 0.0, fin_mid);
         data.add_pnl_snapshot(t_us, cash, 0.0);
 
         return data;

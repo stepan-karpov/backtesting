@@ -74,8 +74,11 @@ return [("bid", mid - 1*d, q), ("bid", mid - 2*d, q), ("bid", mid - 3*d, q),
 | `ob.best_ask` | float | top ask price |
 | `ob.spread` | float | `best_ask − best_bid` |
 | `ob.timestamp_us` | int | event timestamp in microseconds |
-| `ob.bids` | list[list] | 30 levels `[price, amount]`, descending |
-| `ob.asks` | list[list] | 30 levels `[price, amount]`, ascending |
+| `ob.bids` | list[list] | `depth` levels `[price, amount]`, descending |
+| `ob.asks` | list[list] | `depth` levels `[price, amount]`, ascending |
+
+`depth` is set by the feed (`LighterFeed(..., depth=3)`); indexing `ob.bids`/`ob.asks`
+beyond it raises `IndexError`.
 
 ### `on_fill(t_us, side, price, size)`
 
@@ -86,8 +89,8 @@ Called after each fill. `side` is `"bid"`, `"ask"`, or `"markout"` (final positi
 ## LighterFeed API
 
 ```python
-feed = LighterFeed(lob_paths, trades_paths)
-feed                # repr: snapshot/trade counts and time spans
+feed = LighterFeed(lob_paths, trades_paths, depth=3)   # load 3 book levels
+feed                # repr: depth, snapshot/trade counts and time spans
 feed.arrays()       # dict of normalised numpy arrays passed to the engine
 ```
 
@@ -95,7 +98,9 @@ Loads and normalises Lighter data on construction:
 
 - ordered by **exchange time** (LOB `sent_ts`, trades `timestamp`), µs;
 - `is_maker_ask` → `is_sell` (aggressor side);
-- 30 book levels into `[n, 30]` price/size grids.
+- `depth` book levels into `[n, depth]` price/size grids (parquet column projection —
+  only the loaded levels are read, keeping long horizons in RAM). The engine reads the
+  active depth from the array width; `depth ≤ MAX_LOB_LEVELS` (30).
 
 This is the only venue-aware component: a feed for another venue with the same
 `.arrays()` output drops in without engine changes.
@@ -145,7 +150,7 @@ Plot panels: quote offsets from mid · PnL · inventory · cumulative fill imbal
 
 ```
 backtesting/lighter/
-  __init__.py        # exports: Strategy, Backtester, OrderBook, LighterFeed, LOB_LEVELS
+  __init__.py        # exports: Strategy, Backtester, OrderBook, LighterFeed, MAX_LOB_LEVELS
   strategy.py        # Strategy base class (Python)
   feed.py            # LighterFeed: parquet/zst → normalised numpy arrays
   backtester.py      # Thin wrapper: calls _engine.run_arrays(), returns prefix
