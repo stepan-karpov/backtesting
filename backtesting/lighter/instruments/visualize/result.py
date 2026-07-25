@@ -43,6 +43,7 @@ class BacktestResult:
         self.deadband = deadband
         self._grid_cache = None
         self._ff_cache = None
+        self._mtm_cache = None
         self._load(prefix)
 
     def _load(self, prefix: str) -> None:
@@ -90,6 +91,62 @@ class BacktestResult:
         self._grid_cache = g
         return g
 
+    def _grid_mtm(self) -> pd.Series:
+        """Fill-aware inventory MtM per grid second (a Series on the 1s grid).
+
+        The naive grid MtM ``inventory(t)·Δmid(t)`` charges a whole second's move to the
+        boundary position; a mid-second fill changes the position mid-interval, so part of
+        the move is attributed to the wrong position — error ~ size·|intra-second Δmid|,
+        random signs, growing like √N_fills·size (~$23 at large Q over 11 days). Fix: in a
+        second that has fills, split the interval at the fills' exact timestamps and
+        ``mid_at_fill``, telescoping over sub-intervals; between fills the position is
+        exactly constant, so the split is exact, not an approximation. A fill exactly on a
+        boundary τ=t belongs to ``[t, t+1)`` (half-open). Summed over the run this equals
+        the exact checkpoint decomposition to machine precision — the boundary grid-mids
+        telescope away. Falls back to the naive grid MtM when ``mid_at_fill`` is absent.
+        """
+        if self._mtm_cache is not None:
+            return self._mtm_cache
+        g = self._grid()
+        M = g["mid"]
+        M_next = M.shift(-1)
+
+        if not self._has_mid or not len(self.fills):
+            self._mtm_cache = g["inventory"].shift(1) * M.diff()   # degrade to naive
+            return self._mtm_cache
+
+        idx = g.index
+        f_sec = self.fills.index.floor("1s")
+        m = self.fills["mid_at_fill"].to_numpy()
+        inv = self.fills["inv_after"].to_numpy()
+        inv_before = np.concatenate([[0.0], inv[:-1]])             # position entering each fill
+
+        # inventory carried into each grid second (from fills, as-of ≤ boundary)
+        carry = pd.Series(inv, index=self.fills.index)
+        carry = carry[~carry.index.duplicated(keep="last")].sort_index()
+        i_enter = carry.reindex(idx, method="ffill").fillna(0.0)
+
+        d = i_enter * (M_next - M)                                 # fill-less seconds (baseline)
+
+        fdf = pd.DataFrame({"sec": f_sec, "m": m, "inv": inv, "inv_before": inv_before,
+                            "M_s": M.reindex(f_sec).to_numpy(),
+                            "M_next": M_next.reindex(f_sec).to_numpy()})
+
+        def _sec(grp):
+            mm, ii, ib = grp["m"].to_numpy(), grp["inv"].to_numpy(), grp["inv_before"].to_numpy()
+            Ms, Mn = grp["M_s"].iloc[0], grp["M_next"].iloc[0]
+            term_start = ib[0] * (mm[0] - Ms)                      # start of second → first fill
+            term_mid = (ii[:-1] * np.diff(mm)).sum() if len(mm) > 1 else 0.0   # between fills
+            term_end = 0.0 if np.isnan(Mn) else ii[-1] * (Mn - mm[-1])         # last fill → end
+            return term_start + term_mid + term_end
+
+        per_sec = fdf.groupby("sec", sort=True)[["m", "inv", "inv_before", "M_s", "M_next"]].apply(_sec)
+        d.loc[per_sec.index] = per_sec.values
+        # d is indexed by each interval's LEFT boundary [s, s+1); shift to the RIGHT
+        # boundary so it aligns with ΔPnL(t)=pnl(t)-pnl(t-1) and the naive diff convention.
+        self._mtm_cache = d.shift(1)
+        return self._mtm_cache
+
     def _fill_frame(self) -> pd.DataFrame:
         """Trade fills (side==markout excluded from every statistic) + per-fill edge."""
         if self._ff_cache is not None:
@@ -116,9 +173,9 @@ class BacktestResult:
 
     def _decomp(self) -> dict:
         total = float(self.pnl.iloc[-1]) if len(self.pnl) else np.nan
-        g = self._grid()
-        # grid version of inv_mtm: inventory held over each 1-s step × its Δmid
-        inv_mtm_grid = float((g["inventory"].shift(1) * g["mid"].diff()).sum(skipna=True))
+        # fill-aware grid inv_mtm: exact within-second attribution (see _grid_mtm).
+        # Sums to the exact checkpoint decomposition, so inv_mtm_grid_error → ~0.
+        inv_mtm_grid = float(self._grid_mtm().sum(skipna=True))
         out = {"total": total, "inv_mtm_grid": inv_mtm_grid}
 
         if self._has_mid and len(self.fills):
@@ -195,6 +252,7 @@ class BacktestResult:
         n_days = max((g.index[-1] - g.index[0]).total_seconds() / 86400.0, 1e-9)
         tot = float(self.pnl.iloc[-1]) if len(self.pnl) else 0.0
         v["total_pnl"] = tot
+        v["n_days"] = float(n_days)      # run span in days (used by downstream economic-scale gates)
 
         # ---- PnL, temporal (grid) ----
         pnl_g = g["pnl"].dropna()
@@ -229,9 +287,12 @@ class BacktestResult:
             v["net_edge_ci_lo"] = v["net_edge_ci_hi"] = np.nan
 
         # ---- variance / correlation (grid) ----
-        pair = pd.concat([g["pnl"].diff(), g["inventory"].shift(1) * g["mid"].diff()], axis=1).dropna()
-        if len(pair) >= 2 and pair.iloc[:, 0].std() > 0 and pair.iloc[:, 1].std() > 0:
-            r = float(pair.iloc[:, 0].corr(pair.iloc[:, 1]))
+        # d_mtm is the fill-aware inventory MtM per second (see _grid_mtm); the 1 − corr²
+        # definition is unchanged, only the series it consumes is more accurate.
+        pair = pd.concat([g["pnl"].diff().rename("dpnl"),
+                          self._grid_mtm().rename("dmtm")], axis=1).dropna()
+        if len(pair) >= 2 and pair["dpnl"].std() > 0 and pair["dmtm"].std() > 0:
+            r = float(pair["dpnl"].corr(pair["dmtm"]))
             v["capture_share_of_variance"] = 1.0 - r * r
         else:
             v["capture_share_of_variance"] = np.nan
@@ -312,13 +373,17 @@ class BacktestResult:
         notes["quote_updates/min p95"] = "proxy (quotes.csv stride-sampled)"
         notes.setdefault("two_sided_uptime (%)", "quotes as-of between log strides")
 
-        # coarse-log heuristic: median quote-log interval ≫ 1-s grid → undersampled
+        # coarse-log heuristic: median quote-log interval ≫ 1-s grid → undersampled.
+        # Exposed as columns too — the direct coarse-log gate for downstream screening
+        # (inv_mtm_grid_error is now fill-aware ≈ 0 and no longer detects coarse logs).
         med_q_dt = float(np.median(np.diff(self.quotes.index.asi8)) / 1e9) if len(self.quotes) > 1 else np.nan
+        med_p_dt = float(np.median(np.diff(self.pnl.index.asi8)) / 1e9) if len(self.pnl) > 1 else np.nan
+        v["median_quote_interval_s"] = med_q_dt
+        v["median_pnl_interval_s"] = med_p_dt
         if not np.isnan(med_q_dt) and med_q_dt > 1.5:
             cnote = f"coarse quote log (median {med_q_dt:.1f}s > 1s grid); undersampled"
             for k in ("n_jumps", "two_sided_uptime (%)", "markout_30s (bps)"):
                 notes[k] = cnote
-        med_p_dt = float(np.median(np.diff(self.pnl.index.asi8)) / 1e9) if len(self.pnl) > 1 else np.nan
         if not np.isnan(med_p_dt) and med_p_dt > 1.5:
             notes["sharpe_annualized"] = f"grid from log_interval≈{med_p_dt:.1f}s (coarse)"
 
@@ -326,6 +391,7 @@ class BacktestResult:
         notes.setdefault("markout_30s (bps)", "horizon mid: grid as-of")
 
         if not self._has_mid:
+            notes["capture_share_of_variance"] = "fill-aware unavailable (no mid_at_fill); naive grid d_mtm"
             mnote = "needs mid_at_fill (rebuild engine / rerun)"
             for k in ("spread_capture ($)", "spread_capture (% of total)", "capture_yield (bps)",
                       "inventory_mtm ($)", "inventory_mtm (% of total)", "identity_gap ($)",
@@ -530,5 +596,52 @@ class BacktestResult:
             template=DARK, height=height, showlegend=True,
             legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top"),
             margin=dict(r=160),
+        )
+        return fig
+
+    def plot_price(self, height: int = 500, resample: str = "1min",
+                   show_quotes: bool = True, show_fills: bool = False):
+        """Price chart: mid over time, with the strategy's bid/ask quote curves.
+
+        Returns a Plotly figure — use like ``s.plot_price().show()``.
+          resample    : line resolution (pass "1s"/"5min" for finer/coarser).
+          show_quotes : draw the strategy's own bid/ask quote curves (sit near mid —
+                        zoom in to see the offset).
+          show_fills  : overlay fills as markers (buy = lime ▲, sell = red ▼); off by default.
+        """
+        fig = go.Figure()
+
+        if len(self.quotes):
+            mid = self.quotes["mid"].resample(resample).last().dropna()
+            fig.add_trace(go.Scatter(
+                x=mid.index, y=mid.values, mode="lines",
+                name="mid", line=dict(color="cyan", width=1)))
+            if show_quotes:
+                qb = self.quotes["bid"].resample(resample).last()
+                qa = self.quotes["ask"].resample(resample).last()
+                fig.add_trace(go.Scatter(
+                    x=qb.index, y=qb.values, mode="lines", name="bid quote",
+                    line=dict(color="lime", width=1)))
+                fig.add_trace(go.Scatter(
+                    x=qa.index, y=qa.values, mode="lines", name="ask quote",
+                    line=dict(color="red", width=1)))
+
+        if show_fills and len(self.fills):
+            tf = self.fills[self.fills["side"].isin(["bid", "ask"])]
+            buys, sells = tf[tf["side"] == "bid"], tf[tf["side"] == "ask"]
+            fig.add_trace(go.Scatter(
+                x=buys.index, y=buys["price"], mode="markers", name="buy fill",
+                marker=dict(color="lime", symbol="triangle-up", size=7,
+                            line=dict(color="white", width=0.5))))
+            fig.add_trace(go.Scatter(
+                x=sells.index, y=sells["price"], mode="markers", name="sell fill",
+                marker=dict(color="red", symbol="triangle-down", size=7,
+                            line=dict(color="white", width=0.5))))
+
+        fig.update_layout(
+            template=DARK, height=height, showlegend=True, title="Price & fills",
+            yaxis_title="price",
+            legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top"),
+            margin=dict(r=140),
         )
         return fig
