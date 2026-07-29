@@ -19,7 +19,8 @@ _SIDE_CODE = {"bid": 0, "ask": 1, "markout": 2}
 _PNL_COLS   = {"t_us": "pnl_t", "pnl": "pnl_v", "inventory": "inv_v"}
 _QUOTE_COLS = {"t_us": "qt_t", "bid": "qt_bid", "ask": "qt_ask", "mid": "qt_mid"}
 _FILL_COLS  = {"t_us": "fill_t", "side": "fill_side", "price": "fill_price",
-               "size": "fill_size", "inventory": "fill_inv", "mid_at_fill": "fill_mid"}
+               "size": "fill_size", "inventory": "fill_inv", "mid_at_fill": "fill_mid",
+               "fee": "fill_fee"}
 
 
 def save_run(arrays: dict, prefix: str) -> str:

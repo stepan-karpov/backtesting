@@ -85,6 +85,35 @@ TEST(Backtester, PnlAccountingAndMarkout) {
     EXPECT_DOUBLE_EQ(d.inv_v.back(), 0.0);
 }
 
+// ── fees: each real fill pays fee_bps of notional (markout is fee-free), and the
+//    reported PnL drops by exactly the total fee versus a zero-fee run. ──
+TEST(Backtester, FeeChargedPerFillReducesPnl) {
+    Feed f;
+    f.lob(0, 100.0, 0.0, 101.0, 0.0)
+     .trade(100, true, 100.0, 100.0)               // bid@100 fills 5 → notional 500
+     .lob(200, 110.0, 0.0, 111.0, 0.0);
+
+    OnceStrategy s0({bid(100.0, 5.0)});
+    RunData d0 = f.run(s0, 0, 10'000'000, 1, /*fee_bps=*/0.0);
+    OnceStrategy s1({bid(100.0, 5.0)});
+    RunData d1 = f.run(s1, 0, 10'000'000, 1, /*fee_bps=*/10.0);
+
+    // fee on the real fill = 10 bps · 100 · 5 = 0.5 ; markout (side 2) pays nothing
+    double fee_sum = 0.0, markout_fee = -1.0;
+    for (std::size_t i = 0; i < d1.fill_side.size(); ++i) {
+        if (d1.fill_side[i] == 2) markout_fee = d1.fill_fee[i];
+        else                      fee_sum += d1.fill_fee[i];
+    }
+    EXPECT_NEAR(fee_sum, 0.5, 1e-9);
+    EXPECT_DOUBLE_EQ(markout_fee, 0.0);
+
+    for (double fee : d0.fill_fee) EXPECT_DOUBLE_EQ(fee, 0.0);   // zero-fee run → all zeros
+
+    ASSERT_FALSE(d0.pnl_v.empty());
+    ASSERT_FALSE(d1.pnl_v.empty());
+    EXPECT_NEAR(d1.pnl_v.back(), d0.pnl_v.back() - 0.5, 1e-9);   // PnL drops by exactly the fee
+}
+
 // ── determinism: identical inputs → identical output ──
 TEST(Backtester, Deterministic) {
     Feed f;

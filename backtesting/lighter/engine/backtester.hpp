@@ -38,6 +38,7 @@ class Backtester {
     int64_t latency_us_;
     int64_t log_interval_us_;
     int64_t quote_log_stride_;
+    double  fee_rate_;   // per-fill fee as a fraction of notional (fee_bps * 1e-4)
 
     // ── run state (per run) ───────────────────────────────────────────────────
     // Held in fields, NOT reset between run() calls. Construct a fresh Backtester
@@ -51,10 +52,12 @@ class Backtester {
     std::vector<Order>   live_;                   // orders currently resting on the book
 
 public:
-    Backtester(int64_t latency_us, int64_t log_interval_us, int64_t quote_log_stride)
+    Backtester(int64_t latency_us, int64_t log_interval_us, int64_t quote_log_stride,
+               double fee_bps = 0.0)
         : latency_us_(latency_us)
         , log_interval_us_(log_interval_us)
         , quote_log_stride_(quote_log_stride < 1 ? 1 : quote_log_stride)
+        , fee_rate_(fee_bps * 1e-4)
     {}
 
     template <class LobSource, class TradeSource>
@@ -101,10 +104,11 @@ public:
             }
         }
 
-        // Final markout — lob_source.orderbook() retains last valid state
+        // Final markout — lob_source.orderbook() retains last valid state.
+        // A valuation mark, not a resting order, so it pays no fee (fee = 0).
         const double fin_mid = lob_source.orderbook().mid();
         cash_ += inventory_ * fin_mid;
-        data.add_fill(current_timestamp_us, Fill{2, fin_mid, -inventory_}, 0.0, fin_mid);
+        data.add_fill(current_timestamp_us, Fill{2, fin_mid, -inventory_}, 0.0, fin_mid, 0.0);
         data.add_pnl_snapshot(current_timestamp_us, cash_, 0.0);
 
         return data;
@@ -171,7 +175,9 @@ private:
         for (const auto& f : trade_fills) {
             if (f.side == 0) { cash_ -= f.price * f.size; inventory_ += f.size; }
             else             { cash_ += f.price * f.size; inventory_ -= f.size; }
-            data.add_fill(current_timestamp_us, f, inventory_, order_book.mid());
+            const double fee = fee_rate_ * f.price * f.size;   // fraction of notional
+            cash_ -= fee;                                      // fee is always a cost
+            data.add_fill(current_timestamp_us, f, inventory_, order_book.mid(), fee);
             strategy.on_fill(current_timestamp_us, f);
         }
     }

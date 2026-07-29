@@ -81,7 +81,8 @@ struct Feed {
     }
 
     RunData run(StrategyBase& strat, int64_t latency_us,
-                int64_t log_interval_us = 10'000'000, int64_t quote_stride = 1) const {
+                int64_t log_interval_us = 10'000'000, int64_t quote_stride = 1,
+                double fee_bps = 0.0) const {
         const int n = static_cast<int>(snaps.size());
         std::vector<int64_t> lts(n);
         std::vector<float>   bp(n * depth, 0.0f),  bs(n * depth, 0.0f);   // float32 grids
@@ -105,7 +106,7 @@ struct Feed {
         ArrayLobReader   lob(lts.data(), bp.data(), bs.data(), ap.data(), as.data(), n, depth);
         ArrayTradeReader tr(tts.data(), tsell.data(), tpx.data(), tsz.data(), m);
         PessimisticExecution exec;
-        Backtester bt(latency_us, log_interval_us, quote_stride);
+        Backtester bt(latency_us, log_interval_us, quote_stride, fee_bps);
         return bt.run(strat, exec, lob, tr);
     }
 };

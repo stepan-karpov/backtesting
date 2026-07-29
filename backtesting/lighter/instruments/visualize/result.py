@@ -69,7 +69,8 @@ class BacktestResult:
             {"side": side, "price": np.asarray(a["fill_price"], float),
              "size": np.asarray(a["fill_size"], float),
              "inv_after": np.asarray(a["fill_inv"], float),
-             "mid_at_fill": np.asarray(a["fill_mid"], float)},
+             "mid_at_fill": np.asarray(a["fill_mid"], float),
+             "fee": np.asarray(a["fill_fee"], float)},   # per-fill fee $ (engine, net PnL)
             index=to_dt(a["fill_t"]))
 
     # ── grid & fill frames ──────────────────────────────────────────────────────
@@ -189,10 +190,15 @@ class BacktestResult:
             key = (f.index + pd.Timedelta(seconds=self.markout_s)).floor("1s")
             mid_fwd = grid["mid"].reindex(key).to_numpy()   # NaN past grid end → too-late fills
             f["markout_bps"] = sign * (mid_fwd - m) / m * 1e4
-            f["net_edge_bps"] = f["captured_bps"] + f["markout_bps"]
+            # per-fill fee in bps of notional, derived from the recorded $ fee. net edge is
+            # the after-fee unit economics: captured half-spread + markout − fee.
+            notional = f["price"].to_numpy() * f["size"].to_numpy()
+            f["fee_bps"] = np.where(notional != 0.0, f["fee"].to_numpy() / notional * 1e4, 0.0)
+            f["net_edge_bps"] = f["captured_bps"] + f["markout_bps"] - f["fee_bps"]
         else:
             f["captured_bps"] = np.nan
             f["markout_bps"] = np.nan
+            f["fee_bps"] = np.nan
             f["net_edge_bps"] = np.nan
         self._ff_cache = f
         return f
@@ -216,10 +222,13 @@ class BacktestResult:
             mids = self.fills["mid_at_fill"].to_numpy()
             inv = self.fills["inv_after"].to_numpy()
             out["inv_mtm_exact"] = float((inv[:-1] * np.diff(mids)).sum()) if len(mids) >= 2 else 0.0
-            out["identity_gap"] = total - out["spread_capture"] - out["inv_mtm_exact"]
+            out["fees"] = float(self.fills["fee"].sum())    # markout fee is 0
+            # PnL is net of fees (engine), spread_capture / inv_mtm are gross, so the exact
+            # identity is total = spread_capture + inv_mtm − fees → gap closes to ~0.
+            out["identity_gap"] = total - out["spread_capture"] - out["inv_mtm_exact"] + out["fees"]
             out["inv_mtm_grid_error"] = inv_mtm_grid - out["inv_mtm_exact"]
         else:
-            out.update(spread_capture=np.nan, inv_mtm_exact=np.nan,
+            out.update(spread_capture=np.nan, inv_mtm_exact=np.nan, fees=np.nan,
                        identity_gap=np.nan, inv_mtm_grid_error=np.nan)
         return out
 
@@ -298,6 +307,7 @@ class BacktestResult:
         d = self._decomp()
         v["spread_capture_usd"] = d["spread_capture"]
         v["inv_mtm_usd"] = d["inv_mtm_exact"]
+        v["fees_usd"] = d["fees"]                  # total fees paid (PnL is already net of this)
         v["identity_gap_usd"] = d["identity_gap"]
         v["inv_mtm_grid_error_usd"] = d["inv_mtm_grid_error"]
         denom = abs(tot) if abs(tot) > 1e-12 else np.nan
@@ -486,6 +496,7 @@ class BacktestResult:
             ("PnL", "capture_yield (bps)",            fmt("bps", "capture_yield_bps")),
             ("PnL", "inventory_mtm ($)",              fmt("usd4", "inv_mtm_usd")),
             ("PnL", "inventory_mtm (% of total)",     fmt("pct2", "inv_mtm_pct")),
+            ("PnL", "fees ($)",                       fmt("usd4", "fees_usd")),
             ("PnL", "identity_gap ($)",               fmt("usd4", "identity_gap_usd")),
             ("PnL", "inv_mtm_grid_error ($)",         fmt("usd4", "inv_mtm_grid_error_usd")),
             ("PnL", "net_edge_per_fill (bps)",        fmt("bps", "net_edge_per_fill_bps")),
@@ -527,12 +538,13 @@ class BacktestResult:
              resample: str = "1min"):
         trade_fills = self.fills[self.fills["side"].isin(["bid", "ask"])]
 
-        # --- PnL decomposition: spread capture vs inventory drift ---
+        # --- PnL decomposition: spread capture − fees + inventory drift = net PnL ---
         spread_pnl = pd.Series(dtype=float)
         inv_drift  = pd.Series(dtype=float)
+        fee_pnl    = pd.Series(dtype=float)
         if len(trade_fills) and len(self.quotes):
             fills_m = pd.merge_asof(
-                trade_fills[["side", "price", "size"]].sort_index(),
+                trade_fills[["side", "price", "size", "fee"]].sort_index(),
                 self.quotes[["mid"]].sort_index(),
                 left_index=True, right_index=True,
                 direction="backward",
@@ -542,16 +554,18 @@ class BacktestResult:
                 (fills_m["mid"] - fills_m["price"]) * fills_m["size"],
                 (fills_m["price"] - fills_m["mid"]) * fills_m["size"],
             )
-            cum_spread = pd.Series(per_fill.cumsum(), index=fills_m.index)
-            cs_df  = pd.DataFrame({"val": cum_spread.values}, index=cum_spread.index)
-            pnl_df = pd.DataFrame({"t": self.pnl.index}, index=self.pnl.index)
-            merged = pd.merge_asof(
-                pnl_df.sort_index(), cs_df.sort_index(),
-                left_index=True, right_index=True,
-                direction="backward",
-            )
-            spread_pnl = pd.Series(merged["val"].fillna(0.0).values, index=self.pnl.index)
-            inv_drift  = self.pnl - spread_pnl
+            # step each cumulative curve onto the PnL timeline (as-of backward)
+            def onto_pnl(cum: pd.Series) -> pd.Series:
+                cd = pd.DataFrame({"val": cum.values}, index=cum.index).sort_index()
+                pnl_df = pd.DataFrame({"t": self.pnl.index}, index=self.pnl.index)
+                merged = pd.merge_asof(pnl_df.sort_index(), cd,
+                                       left_index=True, right_index=True, direction="backward")
+                return pd.Series(merged["val"].fillna(0.0).values, index=self.pnl.index)
+
+            spread_pnl = onto_pnl(pd.Series(per_fill.cumsum(), index=fills_m.index))
+            fee_cum    = onto_pnl(pd.Series(fills_m["fee"].to_numpy().cumsum(), index=fills_m.index))
+            fee_pnl    = -fee_cum                          # fees drag PnL down (negative line)
+            inv_drift  = self.pnl - spread_pnl + fee_cum   # net = spread − fees + inv_drift
 
         # --- Downsample PnL / inventory to target resolution ---
         pnl_ds = self.pnl.resample(resample).last().dropna()
@@ -559,6 +573,7 @@ class BacktestResult:
         if len(spread_pnl):
             spread_pnl = spread_pnl.resample(resample).last().dropna()
             inv_drift  = inv_drift.resample(resample).last().dropna()
+            fee_pnl    = fee_pnl.resample(resample).last().dropna()
 
         # --- Quote offsets from mid ---
         if len(self.quotes):
@@ -613,6 +628,11 @@ class BacktestResult:
                 x=inv_drift.index, y=inv_drift.values,
                 mode="lines", name="inventory drift",
                 line=dict(color="orange", dash="dot")), row=2, col=1)
+            if len(fee_pnl) and float(fee_pnl.abs().max()) > 0.0:   # omit the flat-zero fee-free line
+                fig.add_trace(go.Scatter(
+                    x=fee_pnl.index, y=fee_pnl.values,
+                    mode="lines", name="fees",
+                    line=dict(color="red", dash="dot")), row=2, col=1)
         fig.add_hline(y=0, line=dict(width=0.5, dash="dot", color="gray"), row=2, col=1)
         fig.update_yaxes(title_text="PnL ($)", row=2, col=1)
 

@@ -108,7 +108,8 @@ static py::dict run_arrays(
     F64Array   trade_size,
     int64_t    latency_us,
     int64_t    log_interval_us,
-    int64_t    quote_log_stride
+    int64_t    quote_log_stride,
+    double     fee_bps
 ) {
     const int64_t depth   = require_valid_shapes(lob_ts, bid_px, bid_sz, ask_px, ask_sz,
                                                  trade_ts, trade_is_sell, trade_price, trade_size);
@@ -117,7 +118,7 @@ static py::dict run_arrays(
 
     PyStrategy           py_strat(std::move(strategy));
     PessimisticExecution exec;
-    Backtester           bt(latency_us, log_interval_us, quote_log_stride);
+    Backtester           bt(latency_us, log_interval_us, quote_log_stride, fee_bps);
 
     ArrayLobReader lob(
         lob_ts.data(),
@@ -146,6 +147,7 @@ static py::dict run_arrays(
     out["fill_size"]  = to_np(data.fill_size);
     out["fill_inv"]   = to_np(data.fill_inv);
     out["fill_mid"]   = to_np(data.fill_mid);
+    out["fill_fee"]   = to_np(data.fill_fee);
     return out;
 }
 
@@ -187,6 +189,6 @@ PYBIND11_MODULE(_engine, m) {
         "lob_ts"_a,
         "bid_px"_a, "bid_sz"_a, "ask_px"_a, "ask_sz"_a,
         "trade_ts"_a, "trade_is_sell"_a, "trade_price"_a, "trade_size"_a,
-        "latency_us"_a, "log_interval_us"_a, "quote_log_stride"_a
+        "latency_us"_a, "log_interval_us"_a, "quote_log_stride"_a, "fee_bps"_a
     );
 }

@@ -21,12 +21,16 @@ class Backtester:
         latency_us: int = 0,
         log_interval_sec: float = 10.0,
         quote_log_stride: int = 50,
+        fee_bps: float = 0.0,
     ):
         # Round-trip order latency: a quote decided at exchange time T lands at
         # T + latency_us. See engine/backtester.hpp for the in-flight model.
         self._latency_us = int(latency_us)
         self.log_interval_us = int(log_interval_sec * 1_000_000)
         self.quote_log_stride = max(1, int(quote_log_stride))
+        # Per-fill fee as bps of notional, charged online in the engine (fill_fee column,
+        # net PnL). Baked into the run — different fees mean different runs. 0 = fee-free.
+        self.fee_bps = float(fee_bps)
 
     def run(self, strategy: Strategy, feed, output_path: str = "result") -> str:
         """Run the simulation on `feed`; persist the result and return its prefix.
@@ -42,5 +46,6 @@ class Backtester:
             latency_us=self._latency_us,
             log_interval_us=self.log_interval_us,
             quote_log_stride=self.quote_log_stride,
+            fee_bps=self.fee_bps,
         )
         return save_run(arrays, output_path)

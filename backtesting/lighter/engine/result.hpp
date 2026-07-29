@@ -13,7 +13,7 @@ struct RunData {
 
     std::vector<int64_t> fill_t;
     std::vector<int32_t> fill_side;
-    std::vector<double>  fill_price, fill_size, fill_inv, fill_mid;
+    std::vector<double>  fill_price, fill_size, fill_inv, fill_mid, fill_fee;
 
     void reserve(std::size_t n_quotes, std::size_t n_pnl, std::size_t n_fills) {
         qt_t.reserve(n_quotes);
@@ -29,6 +29,7 @@ struct RunData {
         fill_size.reserve(n_fills);
         fill_inv.reserve(n_fills);
         fill_mid.reserve(n_fills);
+        fill_fee.reserve(n_fills);
     }
 
     void add_pnl_snapshot(int64_t t, double pnl, double inv) {
@@ -48,12 +49,13 @@ struct RunData {
         qt_mid.push_back(mid);
     }
 
-    void add_fill(int64_t t, const Fill& f, double inv_after, double mid_at_fill) {
+    void add_fill(int64_t t, const Fill& f, double inv_after, double mid_at_fill, double fee) {
         fill_t.push_back(t);
         fill_side.push_back(f.side);
         fill_price.push_back(f.price);
         fill_size.push_back(f.size);
         fill_inv.push_back(inv_after);
         fill_mid.push_back(mid_at_fill);
+        fill_fee.push_back(fee);
     }
 };
