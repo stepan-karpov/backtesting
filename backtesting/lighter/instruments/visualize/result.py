@@ -86,12 +86,36 @@ class BacktestResult:
         start = self.pnl.index[0].floor("1s")
         end = self.pnl.index[-1].ceil("1s")
         idx = pd.date_range(start, end, freq="1s")
+        left = pd.DataFrame({"t": idx})
+
+        # As-of (backward) sample each source onto the 1s grid via merge_asof — one sorted
+        # linear merge, no index hashing. reindex(ffill) needs a unique index, but the 6.7M
+        # quotes index has duplicate-µs rows, so it forced a dedup whose hashing dominated
+        # summary. merge_asof handles duplicates natively (takes the last row at or before
+        # each grid second = keep-last), and is ~12x faster here. Sources are already sorted
+        # (engine emits monotonic timestamps); the stable-sort guard is a defensive fallback
+        # that preserves last-per-timestamp semantics if that ever fails.
+        def as_of(src):
+            if not src["t"].is_monotonic_increasing:
+                src = src.sort_values("t", kind="stable")
+            return pd.merge_asof(left, src, on="t", direction="backward")
+
+        pnl_g = as_of(pd.DataFrame({"t": self.pnl.index,
+                                    "pnl": self.pnl.to_numpy(),
+                                    "inventory": self.inventory.to_numpy()}))
+        # has_bid/has_ask: presence is notna() on the RAW rows, before the as-of — ffilling
+        # the price would carry the last quote through periods we stopped quoting that side.
+        q_g = as_of(pd.DataFrame({"t": self.quotes.index,
+                                  "mid": self.quotes["mid"].to_numpy(),
+                                  "has_bid": self.quotes["bid"].notna().to_numpy().astype(float),
+                                  "has_ask": self.quotes["ask"].notna().to_numpy().astype(float)}))
+
         g = pd.DataFrame(index=idx)
-        g["pnl"] = self._asof(self.pnl, idx)
-        g["inventory"] = self._asof(self.inventory, idx)
-        g["mid"] = self._asof(self.quotes["mid"], idx)
-        g["has_bid"] = self._asof(self.quotes["bid"].notna().astype(float), idx).fillna(0.0) > 0.5
-        g["has_ask"] = self._asof(self.quotes["ask"].notna().astype(float), idx).fillna(0.0) > 0.5
+        g["pnl"] = pnl_g["pnl"].to_numpy()
+        g["inventory"] = pnl_g["inventory"].to_numpy()
+        g["mid"] = q_g["mid"].to_numpy()
+        g["has_bid"] = q_g["has_bid"].fillna(0.0).to_numpy() > 0.5
+        g["has_ask"] = q_g["has_ask"].fillna(0.0).to_numpy() > 0.5
         self._grid_cache = g
         return g
 
@@ -331,10 +355,11 @@ class BacktestResult:
         mx = v["max_abs_inventory"]
         v["time_at_90pct_max_inv_pct"] = float((inv.abs() >= 0.9 * mx).mean() * 100) if mx > 0 else np.nan
 
-        med_size = float(tf["size"].median()) if len(tf) else np.nan
-        deadband = self.deadband if self.deadband is not None else (
-            0.1 * med_size if not np.isnan(med_size) else 0.0)
-        outside = inv.abs() > deadband
+        # deadband is a DOLLAR notional threshold (default $20): ignore position wiggles
+        # worth less than this, so zero-crossings / excursions stay comparable across
+        # assets of very different coin price. Compare |inv·mid| — the position's $ value.
+        deadband_usd = self.deadband if self.deadband is not None else 20.0
+        outside = (inv.abs() * g["mid"]) > deadband_usd
         grp = outside.groupby((outside != outside.shift()).cumsum())
         exc = grp.size()[grp.first()]                          # lengths (s) of |inv|>band runs
         v["median_excursion_min"] = float(exc.median() / 60.0) if len(exc) else np.nan
@@ -364,15 +389,23 @@ class BacktestResult:
         # ---- ops (grid + quote log) ----
         v["two_sided_uptime_pct"] = float((g["has_bid"] & g["has_ask"]).mean() * 100)
         changed = ((self.quotes["bid"] != self.quotes["bid"].shift()) |
-                   (self.quotes["ask"] != self.quotes["ask"].shift()))
-        per_min = changed.astype(float).resample("1min").sum()
+                   (self.quotes["ask"] != self.quotes["ask"].shift())).astype(float)
+        # Quote changes per minute. groupby(floor) not resample("1min"): resample calls
+        # inferred_freq on the 6.7M quotes index (~0.7s/run — half of summary), groupby bins
+        # directly. Reindex to the full minute span so quiet minutes count as 0, matching
+        # resample's zero-filled bins. Verified bit-identical (index, values, p50/p95).
+        counts = changed.groupby(self.quotes.index.floor("1min")).sum()
+        if len(counts):
+            full = pd.date_range(counts.index.min(), counts.index.max(), freq="1min")
+            per_min = counts.reindex(full, fill_value=0.0)
+        else:
+            per_min = counts
         v["quote_updates_min_p50"] = float(per_min.median()) if len(per_min) else np.nan
         v["quote_updates_min_p95"] = float(per_min.quantile(0.95)) if len(per_min) else np.nan
 
         # ---- notes ----
-        if self.deadband is None and not np.isnan(med_size):
-            notes["zero_crossings / day"] = f"deadband=0.1·median|size|={deadband:.4g}"
-            notes["median_excursion (min)"] = f"deadband={deadband:.4g}"
+        notes["zero_crossings / day"] = f"deadband=${deadband_usd:.4g} notional"
+        notes["median_excursion (min)"] = f"deadband=${deadband_usd:.4g} notional"
         notes["quote_updates/min p50"] = "proxy (quotes.csv stride-sampled)"
         notes["quote_updates/min p95"] = "proxy (quotes.csv stride-sampled)"
         notes.setdefault("two_sided_uptime (%)", "quotes as-of between log strides")
