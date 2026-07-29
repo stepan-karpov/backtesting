@@ -13,7 +13,7 @@ DARK = "plotly_dark"
 class BacktestResult:
     """Loads a persisted backtest run (3 parquet tables) and reports a strategy summary.
 
-    Public interface is unchanged: ``BacktestResult(prefix, capital).summary_df()``.
+    Public interface: ``BacktestResult(prefix).summary_df()``.
     Extra knobs are optional keyword-only params with defaults, so the old call
     still works. All the new work is private computation on the loaded tables.
 
@@ -35,10 +35,9 @@ class BacktestResult:
       markout are undersampled — ``summary_df()`` warns when it detects a coarse log.
     """
 
-    def __init__(self, prefix: str, capital: float = 1000.0, *,
+    def __init__(self, prefix: str, *,
                  jump_bps: float = 20.0, jump_window_s: int = 60,
                  markout_s: int = 30, deadband: float | None = None):
-        self.capital = capital
         self.jump_bps = jump_bps
         self.jump_window_s = jump_window_s
         self.markout_s = markout_s
@@ -455,7 +454,6 @@ class BacktestResult:
 
     def summary_df(self) -> pd.DataFrame:
         v, notes = self._compute()
-        c = self.capital
 
         def num(x):
             return x is not None and not (isinstance(x, float) and np.isnan(x))
@@ -477,20 +475,14 @@ class BacktestResult:
                 "a2":    lambda: f"{x:.2f}",
             }[kind]()
 
-        def pctof(key):
-            x = v.get(key)
-            return f"{x / c * 100:+.4f}%" if num(x) else "NaN"
-
         def ci():
             lo, hi = v.get("net_edge_ci_lo"), v.get("net_edge_ci_hi")
             return f"[{lo:+.2f}, {hi:+.2f}]" if num(lo) and num(hi) else "NaN"
 
         spec = [
             ("PnL", "total_pnl ($)",                  fmt("usd4", "total_pnl")),
-            # ("PnL", "total_pnl (%)",                  pctof("total_pnl")),
             ("PnL", "sharpe_annualized",              fmt("ratio", "sharpe_annualized")),
             ("PnL", "max_drawdown ($)",               fmt("usd4", "max_drawdown")),
-            # ("PnL", "max_drawdown (%)",               pctof("max_drawdown")),
             ("PnL", "spread_capture ($)",             fmt("usd4", "spread_capture_usd")),
             ("PnL", "spread_capture (% of total)",    fmt("pct2", "spread_capture_pct")),
             ("PnL", "capture_yield (bps)",            fmt("bps", "capture_yield_bps")),
