@@ -1,0 +1,2 @@
+# transient test binary (compiled, run, and removed by `make test`)
+engine_tests

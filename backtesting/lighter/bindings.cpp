@@ -29,33 +29,39 @@ using namespace pybind11::literals;
 
 // ─── PyStrategy: the C++ ↔ Python seam ───────────────────────────────────────
 //
-// on_lob: strategy returns list[(side_str, price, size)]; parsed to vector<Order>.
+// on_lob: calls the Python strategy's on_lob (imperative — no return value), then
+//         drains _collect() → list of (size, price, ttl_s, reduce_only) tuples,
+//         read by index into vector<Order>. Signed size carries the side; ttl_s is
+//         always a number (<= 0 = GTC). No per-order Python object, no attr lookups.
 // on_fill: called with primitive args (t_us, side_str, price, size).
 
 class PyStrategy : public StrategyBase {
     py::object _on_lob;
+    py::object _collect;
     py::object _on_fill;
 
 public:
     explicit PyStrategy(py::object strategy)
         : _on_lob (strategy.attr("on_lob"))
+        , _collect(strategy.attr("_collect"))
         , _on_fill(strategy.attr("on_fill"))
     {}
 
     std::vector<Order> on_lob(const OrderBook& ob, double inventory) override {
-        py::object ret = _on_lob(
-            py::cast(&ob, py::return_value_policy::reference),
-            inventory
-        );
+        _on_lob(py::cast(&ob, py::return_value_policy::reference), inventory);
+        py::object pending = _collect();
+
         std::vector<Order> orders;
-        for (auto item : ret) {
-            auto tup = item.cast<py::tuple>();
-            const char s = tup[0].cast<std::string>()[0];  // 'b' or 'a'
-            orders.push_back({
-                s == 'b',
-                tup[1].cast<double>(),
-                tup[2].cast<double>()
-            });
+        orders.reserve(py::len(pending));
+        for (auto item : pending) {
+            const py::tuple o = item.cast<py::tuple>();      // (size, price, ttl_s, reduce_only)
+            const double  size = o[0].cast<double>();        // signed: sign = side
+            const double  px   = o[1].cast<double>();
+            const double  ttl  = o[2].cast<double>();        // seconds; <= 0 = GTC
+            const bool    ro   = o[3].cast<bool>();
+            const int64_t ttl_us = ttl > 0.0 ? static_cast<int64_t>(ttl * 1e6) : 0;
+            orders.push_back({size > 0.0, px, size < 0.0 ? -size : size,
+                              ttl_us, /*expire_at=*/0, ro});
         }
         return orders;
     }
@@ -79,14 +85,15 @@ public:
 // made only if the caller passed a non-contiguous or wrong-dtype array).
 
 using F64Array = py::array_t<double,  py::array::c_style | py::array::forcecast>;
+using F32Array = py::array_t<float,   py::array::c_style | py::array::forcecast>;
 using I64Array = py::array_t<int64_t, py::array::c_style | py::array::forcecast>;
 using U8Array  = py::array_t<uint8_t, py::array::c_style | py::array::forcecast>;
 
 static void run_arrays(
     py::object strategy,
     I64Array   lob_ts,
-    F64Array   bid_px, F64Array bid_sz,
-    F64Array   ask_px, F64Array ask_sz,
+    F32Array   bid_px, F32Array bid_sz,   // float32 grids — half the RAM of float64
+    F32Array   ask_px, F32Array ask_sz,
     I64Array   trade_ts,
     U8Array    trade_is_sell,
     F64Array   trade_price,
@@ -108,7 +115,7 @@ static void run_arrays(
             "run_arrays: depth must be in [1, " + std::to_string(MAX_LOB_LEVELS) + "]");
 
     // ── shape checks: fail loudly rather than read out of bounds ──────────────
-    auto require_lob_grid = [&](const F64Array& a, const char* name) {
+    auto require_lob_grid = [&](const F32Array& a, const char* name) {
         if (a.ndim() != 2 || a.shape(0) != n_lob || a.shape(1) != depth)
             throw std::runtime_error(
                 std::string("run_arrays: ") + name + " must match bid_px shape [n_lob, depth]");

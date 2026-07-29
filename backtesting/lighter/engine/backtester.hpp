@@ -4,6 +4,7 @@
 #include "reader.hpp"
 #include "result.hpp"
 #include "strategy.hpp"
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <stdexcept>
@@ -17,15 +18,19 @@
 // Trades-first tie-breaking: at equal timestamps, trades processed before LOB.
 //
 // Latency model. A strategy reacting to an event at time T does not affect the
-// exchange instantly: its full desired quote set is put "in flight" and becomes
-// live (replace-all) only at T + latency_us — one round-trip, as a real order
-// packet would. Multiple sets can be in flight at once (a FIFO queue); the live
-// set keeps resting and matching in the meantime.
+// exchange instantly: the orders it creates are put "in flight" and land on the
+// book only at T + latency_us — one round-trip, as a real order packet would.
+// Multiple batches can be in flight at once (a FIFO queue); the live set keeps
+// resting and matching in the meantime.
+//
+// Order lifecycle (MVP: create-only). Landed orders are APPENDED to the live set
+// (additive — no replace-all). An order leaves the book only by being filled or
+// by its GTT lifetime expiring (expire_at, resolved from ttl_us at landing time).
 
-// One in-flight order message: the strategy's desired quotes and when they land.
+// One in-flight order message: the orders to create and when they land.
 struct InFlight {
-    int64_t            active_at;   // exchange time the message reaches the book
-    std::vector<Order> quotes;      // full replace-all set (empty = cancel all)
+    int64_t            active_at;   // exchange time the batch reaches the book
+    std::vector<Order> quotes;      // orders to append to the live set on arrival
 };
 
 class Backtester {
@@ -50,6 +55,18 @@ public:
         if (!lob.valid()) throw std::runtime_error("empty LOB data");
 
         RunData data;
+        // Pre-size outputs: quotes ≈ one per stride events; pnl ≈ span / log_interval;
+        // fills ≈ one per trade (a loose hint — multi-level fills may exceed it).
+        {
+            const int64_t n_lob  = lob.size();
+            const int64_t n_quot = n_lob / quote_log_stride_ + 1;
+            const int64_t n_pnl  = log_interval_us_ > 0
+                                 ? lob.span_us() / log_interval_us_ + 2
+                                 : n_lob / 10 + 1;
+            data.reserve(static_cast<std::size_t>(n_quot),
+                         static_cast<std::size_t>(n_pnl),
+                         static_cast<std::size_t>(trades.size()));
+        }
 
         double cash = 0.0, inventory = 0.0;
 
@@ -71,16 +88,28 @@ public:
 
             t_us = take_lob ? lob.timestamp() : trades.timestamp();
 
-            // Land every message that has arrived by now (latest one wins).
+            // Land every batch that has arrived by now — orders are appended
+            // (additive model), then reap any whose GTT lifetime has elapsed.
             while (!in_flight.empty() && in_flight.front().active_at <= t_us) {
-                live = std::move(in_flight.front().quotes);
+                for (auto& o : in_flight.front().quotes)
+                    live.push_back(std::move(o));
                 in_flight.pop_front();
             }
+            live.erase(
+                std::remove_if(live.begin(), live.end(),
+                    [t_us](const Order& o) {
+                        return o.expire_at != 0 && o.expire_at <= t_us;
+                    }),
+                live.end());
 
             if (take_lob) {
-                // ── LOB event: strategy re-quotes; the new set goes in flight ──
+                // ── LOB event: strategy issues new orders; the batch goes in flight ──
                 OrderBook& ob = lob.orderbook();
-                in_flight.push_back({t_us + latency_us_, strategy.on_lob(ob, inventory)});
+                std::vector<Order> batch = strategy.on_lob(ob, inventory);
+                const int64_t active_at = t_us + latency_us_;
+                for (auto& o : batch)   // resolve GTT lifetime relative to landing
+                    o.expire_at = (o.ttl_us > 0) ? active_at + o.ttl_us : 0;
+                in_flight.push_back({active_at, std::move(batch)});
 
                 if (lob_counter % quote_log_stride_ == 0) {
                     bool   hb = false, ha = false;   // best bid / ask of the live set
@@ -100,7 +129,7 @@ public:
                 const TradeEvent& ev = trades.event();
 
                 trade_fills.clear();
-                exec.match(live, ob, ev.is_sell, ev.price, ev.amount, trade_fills);
+                exec.match(live, ob, ev.is_sell, ev.price, ev.amount, inventory, trade_fills);
 
                 for (const auto& f : trade_fills) {
                     if (f.side == 0) { cash -= f.price * f.size; inventory += f.size; }

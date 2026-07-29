@@ -2,10 +2,9 @@
 #include "execution.hpp"
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
-#include <iomanip>
 #include <limits>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -20,16 +19,23 @@ struct RunData {
     std::vector<int32_t> fill_side;
     std::vector<double>  fill_price, fill_size, fill_inv, fill_mid;
 
-    void reserve(std::size_t n_lob_hint, std::size_t n_fill_hint) {
-        pnl_t.reserve(n_lob_hint / 10);
-        pnl_v.reserve(n_lob_hint / 10);
-        inv_v.reserve(n_lob_hint / 10);
-        fill_t.reserve(n_fill_hint);
-        fill_side.reserve(n_fill_hint);
-        fill_price.reserve(n_fill_hint);
-        fill_size.reserve(n_fill_hint);
-        fill_inv.reserve(n_fill_hint);
-        fill_mid.reserve(n_fill_hint);
+    // Pre-size the output vectors from counts the Backtester knows up front, so the
+    // hot push_back paths don't reallocate. The quote vectors (qt_*) are by far the
+    // largest at a small quote_log_stride — reserving them is the main win.
+    void reserve(std::size_t n_quotes, std::size_t n_pnl, std::size_t n_fills) {
+        qt_t.reserve(n_quotes);
+        qt_bid.reserve(n_quotes);
+        qt_ask.reserve(n_quotes);
+        qt_mid.reserve(n_quotes);
+        pnl_t.reserve(n_pnl);
+        pnl_v.reserve(n_pnl);
+        inv_v.reserve(n_pnl);
+        fill_t.reserve(n_fills);
+        fill_side.reserve(n_fills);
+        fill_price.reserve(n_fills);
+        fill_size.reserve(n_fills);
+        fill_inv.reserve(n_fills);
+        fill_mid.reserve(n_fills);
     }
 
     // ── write API (called by Backtester) ──────────────────────────────────────
@@ -69,11 +75,15 @@ struct RunData {
     void save_csv(const std::string& prefix) const {
         static const char* SIDES[] = {"bid", "ask", "markout"};
 
+        // Fast float → string. snprintf("%.12g") reproduces the old
+        // setprecision(12) default-float output but skips constructing a
+        // std::ostringstream (with its locale machinery) per value — the hot-path
+        // antipattern that dominated save_csv. NaN → empty field, as before.
         auto dbl = [](double v) -> std::string {
             if (std::isnan(v)) return "";
-            std::ostringstream os;
-            os << std::setprecision(12) << v;
-            return os.str();
+            char buf[32];
+            const int n = std::snprintf(buf, sizeof buf, "%.12g", v);
+            return std::string(buf, n > 0 ? n : 0);
         };
 
         {

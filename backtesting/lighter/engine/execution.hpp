@@ -6,9 +6,12 @@
 // ─── Order / Fill ─────────────────────────────────────────────────────────────
 
 struct Order {
-    bool   is_bid;
-    double price;
-    double size;
+    bool    is_bid;
+    double  price;
+    double  size;
+    int64_t ttl_us;      // requested GTT lifetime (0 = GTC); resolved to expire_at at landing
+    int64_t expire_at;   // absolute exchange time the order dies (0 = never)
+    bool    reduce_only; // only fills when it shrinks |inventory|
 };
 
 struct Fill {
@@ -27,11 +30,13 @@ public:
     // Match the live resting orders against one incoming trade.
     //   live       — resting orders; filled orders are shrunk / removed in-place
     //   ob         — apply_trade called in-place
+    //   inventory  — signed position at the start of this trade (for reduce-only)
     //   fills_out  — filled events appended here
     virtual void match(
         std::vector<Order>& live,
         OrderBook& ob,
         bool is_sell, double trade_price, double trade_amount,
+        double inventory,
         std::vector<Fill>& fills_out
     ) = 0;
 };
@@ -51,8 +56,13 @@ public:
         std::vector<Order>& live,
         OrderBook& ob,
         bool is_sell, double trade_price, double trade_amount,
+        double inventory,
         std::vector<Fill>& fills_out
     ) override {
+        // reduce-only: a buy only shrinks a short, a sell only shrinks a long.
+        // Capacity is measured against inventory at the START of this trade, so
+        // several reduce-only fills in one trade can jointly over-reduce (a known
+        // corollary of the independent-matching overfill caveat above).
         for (auto& o : live) {
             if (o.size <= 0.0) continue;
 
@@ -60,6 +70,11 @@ public:
                 double leftover = trade_amount - ob.queue_at(true, o.price);
                 if (leftover > 0.0) {
                     double fill = o.size < leftover ? o.size : leftover;
+                    if (o.reduce_only) {
+                        double cap = -inventory;          // buy reduces a short
+                        if (cap <= 0.0) continue;         // nothing to reduce
+                        if (fill > cap) fill = cap;
+                    }
                     fills_out.push_back({0, o.price, fill});
                     o.size -= fill;
                 }
@@ -67,6 +82,11 @@ public:
                 double leftover = trade_amount - ob.queue_at(false, o.price);
                 if (leftover > 0.0) {
                     double fill = o.size < leftover ? o.size : leftover;
+                    if (o.reduce_only) {
+                        double cap = inventory;           // sell reduces a long
+                        if (cap <= 0.0) continue;         // nothing to reduce
+                        if (fill > cap) fill = cap;
+                    }
                     fills_out.push_back({1, o.price, fill});
                     o.size -= fill;
                 }

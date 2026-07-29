@@ -29,10 +29,10 @@ struct TradeEvent {
 
 class ArrayLobReader {
     const int64_t* _ts;
-    const double*  _bid_p;
-    const double*  _bid_a;
-    const double*  _ask_p;
-    const double*  _ask_a;
+    const float*   _bid_p;   // float32 grids (widened to double in OrderBook::refresh)
+    const float*   _bid_a;
+    const float*   _ask_p;
+    const float*   _ask_a;
     int64_t        _n;
     int            _depth;
     int64_t        _i = 0;
@@ -48,8 +48,8 @@ class ArrayLobReader {
 
 public:
     ArrayLobReader(const int64_t* ts,
-                   const double* bid_p, const double* bid_a,
-                   const double* ask_p, const double* ask_a,
+                   const float* bid_p, const float* bid_a,
+                   const float* ask_p, const float* ask_a,
                    int64_t n, int depth)
         : _ts(ts), _bid_p(bid_p), _bid_a(bid_a), _ask_p(ask_p), _ask_a(ask_a),
           _n(n), _depth(depth) {
@@ -62,6 +62,8 @@ public:
     int64_t          timestamp() const noexcept { return _ob.timestamp_us; }
     OrderBook&       orderbook()       noexcept { return _ob; }
     const OrderBook& orderbook() const noexcept { return _ob; }
+    int64_t          size()      const noexcept { return _n; }                      // total snapshots
+    int64_t          span_us()   const noexcept { return _n > 0 ? _ts[_n - 1] - _ts[0] : 0; }
 
     void advance() {
         if (++_i < _n) _load(_i);
@@ -103,6 +105,7 @@ public:
     bool              valid()     const noexcept { return _valid; }
     int64_t           timestamp() const noexcept { return _ev.t_us; }
     const TradeEvent& event()     const noexcept { return _ev; }
+    int64_t           size()      const noexcept { return _n; }                     // total trades
 
     void advance() {
         if (++_i < _n) _load(_i);

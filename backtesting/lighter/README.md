@@ -29,9 +29,10 @@ from backtesting.lighter import Strategy, Backtester, LighterFeed, OrderBook
 from backtesting.lighter.instruments.visualize import BacktestResult
 
 class MyStrategy(Strategy):
-    def on_lob(self, ob: OrderBook, inventory: float) -> list[tuple]:
-        ...
-        return [("bid", bid_price, size), ("ask", ask_price, size)]
+    def on_lob(self, ob: OrderBook, inventory: float) -> None:
+        # imperative: issue orders through the gateway; nothing is returned
+        self.gateway.create_order(+size, ob.mid - d, ttl_s=2.0)
+        self.gateway.create_order(-size, ob.mid + d, ttl_s=2.0)
 
     def on_fill(self, t_us: int, side: str, price: float, size: float) -> None:
         pass  # optional
@@ -53,17 +54,36 @@ r.plot().show()
 
 ## Strategy API
 
-### `on_lob(ob, inventory) → list[tuple]`
+### `on_lob(ob, inventory) → None`
 
-Called on every LOB snapshot. Return the **full desired quote set** as a list of
-`("bid"|"ask", price, size)` tuples — several levels per side are allowed (a ladder).
-Each return replaces the previous set (replace-all); return `[]` to cancel all quotes.
+Called on every LOB snapshot. Issue orders **imperatively** through `self.gateway`;
+`on_lob` returns nothing. Orders are **additive** — each `create_order` appends a new
+order to the book. An order leaves the book only when it is filled or when its GTT
+lifetime (`ttl_s`) elapses. There is no replace-all, so a strategy that quotes must
+throttle itself (quote on a schedule, not every tick) or its orders accumulate.
 
 ```python
-# a 3-level ladder
-return [("bid", mid - 1*d, q), ("bid", mid - 2*d, q), ("bid", mid - 3*d, q),
-        ("ask", mid + 1*d, q), ("ask", mid + 2*d, q), ("ask", mid + 3*d, q)]
+# a 3-level ladder, each order living 2 s
+def on_lob(self, ob, inventory):
+    for i in range(1, 4):
+        self.gateway.create_order(+q, ob.mid - i*d, ttl_s=2.0)
+        self.gateway.create_order(-q, ob.mid + i*d, ttl_s=2.0)
 ```
+
+### `gateway.create_order(size, price, ttl_s=0.0, reduce_only=False)`
+
+The only order verb in the MVP (`cancel_order` / `modify_order` come later).
+
+| Arg | Meaning |
+|---|---|
+| `size` | signed: `> 0` → bid (buy), `< 0` → ask (sell); a zero size is a no-op |
+| `price` | limit price |
+| `ttl_s` | GTT lifetime in seconds (a number, default `0.0`); `<= 0` rests until filled (GTC) |
+| `reduce_only` | order fills only when it shrinks `|inventory|` |
+
+`self.gateway` is an `OrderGateway`. Subclass it in your notebook to add order-management
+policy (tracking, throttling, ladders) on top of the verbs, then assign it in the
+strategy's `__init__`.
 
 `OrderBook` fields available from Python:
 
@@ -150,8 +170,8 @@ Plot panels: quote offsets from mid · PnL · inventory · cumulative fill imbal
 
 ```
 backtesting/lighter/
-  __init__.py        # exports: Strategy, Backtester, OrderBook, LighterFeed, MAX_LOB_LEVELS
-  strategy.py        # Strategy base class (Python)
+  __init__.py        # exports: Strategy, OrderGateway, Backtester, ...
+  strategy.py        # Strategy base + OrderGateway (create_order)
   feed.py            # LighterFeed: parquet/zst → normalised numpy arrays
   backtester.py      # Thin wrapper: calls _engine.run_arrays(), returns prefix
   bindings.cpp       # THE ONLY file with pybind11 — PyStrategy + run_arrays()
@@ -184,12 +204,14 @@ in the engine knows about file formats.
 sources by exchange timestamp. At each step the earlier event is consumed; ties go to
 trades first (the LOB snapshot already reflects a post-trade state).
 
-**Execution & latency model** (`engine/backtester.hpp`). The strategy's returned quote
-set is not applied instantly: it is pushed onto a FIFO of in-flight messages, each
-tagged to land at `T + latency_us`. On every event the engine promotes all messages
-that have arrived (replace-all — the latest wins) into the live resting set. Several
-messages can be in flight at once; the live set keeps resting and matching in the
-meantime. With `latency_us = 0` quotes are live from the next event onward.
+**Execution & latency model** (`engine/backtester.hpp`). The orders a strategy creates
+are not applied instantly: each batch is pushed onto a FIFO of in-flight messages,
+tagged to land at `T + latency_us`. On every event the engine lands all batches that
+have arrived, **appending** their orders to the live resting set (additive — no
+replace-all), then reaps any order whose GTT lifetime has elapsed. A GTT order's
+`expire_at` is measured from when it lands on the book (`T + latency_us + ttl`).
+Several batches can be in flight at once; the live set keeps resting and matching in
+the meantime. With `latency_us = 0` orders are live from the next event onward.
 
 **Matching** (`PessimisticExecution`): each live order is assumed last-in-queue at its
 price level — a fill triggers only when the trade volume exceeds the LOB queue ahead of
@@ -208,7 +230,10 @@ touch. Be aware of the current bounds:
   fills on any through-trade. Fills for such quotes are optimistic.
 - **Independent matching can overfill.** Each level is tested against the full trade
   volume, so one large trade may fill several of your levels beyond its own size.
+- **reduce-only uses start-of-trade inventory.** A reduce-only order is capped against
+  `inventory` as it stood when the trade arrived, so several reduce-only fills within
+  one trade can jointly over-reduce (flip the sign). A corollary of the overfill caveat.
 - **Not modelled yet:** maker/taker fees, latency jitter, nonce-based queue position,
-  tick-size rounding.
+  tick-size rounding, cancel/modify (create-only MVP).
 
 Engine behaviour is checked in `research/exchanges/lighter/BacktestingChecks.ipynb`.

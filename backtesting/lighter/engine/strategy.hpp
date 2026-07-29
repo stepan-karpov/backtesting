@@ -12,8 +12,9 @@ class StrategyBase {
 public:
     virtual ~StrategyBase() = default;
 
-    // Called on every LOB snapshot. Returns active orders for the next tick.
-    // Return an empty vector to pull all quotes.
+    // Called on every LOB snapshot. Returns the orders to CREATE on this event
+    // (appended to the live set — additive, not replace-all). Return an empty
+    // vector to create nothing.
     virtual std::vector<Order> on_lob(const OrderBook& ob, double inventory) = 0;
 
     // Called after each fill. Default is no-op (most strategies ignore fills).

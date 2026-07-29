@@ -38,7 +38,7 @@ PathArg = str | Path | Iterable[str | Path]
 class LighterFeed:
     """Loads `depth` levels of Lighter LOB + trades into engine-ready arrays."""
 
-    def __init__(self, lob_paths: PathArg, trades_paths: PathArg, depth: int = 3):
+    def __init__(self, lob_paths: PathArg, trades_paths: PathArg, depth: int = 15):
         if not 1 <= depth <= MAX_LOB_LEVELS:
             raise ValueError(f"depth must be in [1, {MAX_LOB_LEVELS}], got {depth}")
         self.depth = depth
@@ -48,18 +48,98 @@ class LighterFeed:
     # ── loading ───────────────────────────────────────────────────────────────
 
     def _load_lob(self, lob_paths: PathArg) -> None:
-        cols = ["sent_ts"]
-        for i in range(1, self.depth + 1):
-            cols += [f"bid_px_{i}", f"bid_sz_{i}", f"ask_px_{i}", f"ask_sz_{i}"]
+        # Stream the LOB file-by-file into pre-allocated arrays. The reader's
+        # LobReader.load() would pd.concat every file into one DataFrame first,
+        # then a sort copy, then four grid copies — a ~5x peak over the final
+        # arrays. Here the peak is just the final arrays plus one file's frame.
+        import pyarrow.parquet as pq
 
-        lob = _read_lighter("LobReader", lob_paths, columns=cols)
-        lob = lob.sort_values("sent_ts", kind="stable")
+        depth = self.depth
+        bid_px_c = [f"bid_px_{i}" for i in range(1, depth + 1)]
+        bid_sz_c = [f"bid_sz_{i}" for i in range(1, depth + 1)]
+        ask_px_c = [f"ask_px_{i}" for i in range(1, depth + 1)]
+        ask_sz_c = [f"ask_sz_{i}" for i in range(1, depth + 1)]
+        cols = ["sent_ts"] + bid_px_c + bid_sz_c + ask_px_c + ask_sz_c
 
-        self.lob_ts = lob["sent_ts"].to_numpy(np.int64)
-        self.bid_px = _level_grid(lob, "bid_px", self.depth)
-        self.bid_sz = _level_grid(lob, "bid_sz", self.depth)
-        self.ask_px = _level_grid(lob, "ask_px", self.depth)
-        self.ask_sz = _level_grid(lob, "ask_sz", self.depth)
+        paths = _as_path_list(lob_paths)
+        LobReaderRaw = _lighter_readers().LobReaderRaw
+
+        # Row counts from the parquet footers only (no data read) → exact size to
+        # pre-allocate, so the fill needs no concatenation.
+        n = sum(pq.ParquetFile(str(p)).metadata.num_rows for p in paths)
+
+        self.lob_ts = np.empty(n, np.int64)
+        self.bid_px = np.empty((n, depth), np.float32)   # float32: half the RAM (guarded below)
+        self.bid_sz = np.empty((n, depth), np.float32)
+        self.ask_px = np.empty((n, depth), np.float32)
+        self.ask_sz = np.empty((n, depth), np.float32)
+
+        off = 0
+        max_price = 0.0        # largest price seen (float64), for the precision guard
+        top_uniques = []       # distinct best bid/ask prices (float64), to infer the tick
+        for df in LobReaderRaw(paths, columns=cols):   # one file at a time
+            k = len(df)
+            self.lob_ts[off:off + k] = df["sent_ts"].to_numpy(np.int64)
+            bpx = df[bid_px_c].to_numpy(np.float64)     # this file's prices, float64, for the guard
+            apx = df[ask_px_c].to_numpy(np.float64)
+            self.bid_px[off:off + k] = bpx              # float64 → float32 on assignment
+            self.ask_px[off:off + k] = apx
+            self.bid_sz[off:off + k] = df[bid_sz_c].to_numpy(np.float32)
+            self.ask_sz[off:off + k] = df[ask_sz_c].to_numpy(np.float32)
+            m = max(bpx.max(initial=0.0), apx.max(initial=0.0))
+            if m > max_price:
+                max_price = m
+            top_uniques.append(np.unique(np.concatenate([bpx[:, 0], apx[:, 0]])))
+            off += k
+            del df, bpx, apx
+
+        if off != n:                                   # defensive: fewer rows than the footer claimed
+            self.lob_ts = self.lob_ts[:off]
+            self.bid_px, self.bid_sz = self.bid_px[:off], self.bid_sz[:off]
+            self.ask_px, self.ask_sz = self.ask_px[:off], self.ask_sz[:off]
+
+        # Files arrive in chronological order and each is internally sorted, so the
+        # concatenation is already ascending in sent_ts. Sort only if that is ever
+        # violated (identical result to the old unconditional stable sort).
+        if self.lob_ts.size and not (np.diff(self.lob_ts) >= 0).all():
+            order = np.argsort(self.lob_ts, kind="stable")
+            self.lob_ts = self.lob_ts[order]
+            self.bid_px, self.bid_sz = self.bid_px[order], self.bid_sz[order]
+            self.ask_px, self.ask_sz = self.ask_px[order], self.ask_sz[order]
+
+        self._check_float32_precision(max_price, top_uniques)
+
+    # ── float32 precision guard ─────────────────────────────────────────────────
+
+    _F32_MARGIN = 0.05    # max allowed float32 ULP as a fraction of the price tick
+
+    def _check_float32_precision(self, max_price: float, top_uniques: list) -> None:
+        """Fail loudly if float32 storage would blur the price tick.
+
+        float32's step (ULP) grows with magnitude: at the largest price it is
+        max_price·2**-23. If that reaches _F32_MARGIN of the tick, a price can round
+        toward a neighbouring tick and mid / spread / bps metrics drift. The tick is
+        inferred from the data — the smallest gap between distinct best bid/ask prices
+        — so no exchange fact is assumed. Raised before the feed is used; switch that
+        symbol to a float64 feed if it fires. Sizes are not guarded (low magnitude,
+        negligible metric impact — see review note).
+        """
+        if not top_uniques:
+            return
+        u = np.unique(np.concatenate(top_uniques))
+        u = u[u > 0.0]
+        if u.size < 2:
+            return                                   # single price → no tick to infer
+        tick = float(np.diff(u).min())               # smallest price increment in the data
+        max_ulp = float(max_price) * 2.0 ** -23      # float32 step at the largest price
+        if max_ulp >= self._F32_MARGIN * tick:
+            raise ValueError(
+                f"LighterFeed(depth={self.depth}): float32 would blur the price tick. "
+                f"ULP at max price {max_price:.6g} is {max_ulp:.3e}, not below "
+                f"{self._F32_MARGIN}·tick = {self._F32_MARGIN * tick:.3e} "
+                f"(inferred tick {tick:.3e}). price/tick = {max_price / tick:.2e} exceeds the "
+                f"float32 limit ≈ {self._F32_MARGIN * 2 ** 23:.2e}; use a float64 feed for this symbol."
+            )
 
     def _load_trades(self, trades_paths: PathArg) -> None:
         tr = _read_lighter("TradesReader", trades_paths)
@@ -102,8 +182,8 @@ class LighterFeed:
 # helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _read_lighter(reader_name: str, paths: PathArg, **kwargs) -> pd.DataFrame:
-    """Import tools lazily: only feed users need research/tools on the path."""
+def _lighter_readers():
+    """Import the research Lighter readers lazily — only feed users need them."""
     try:
         from tools.readers import lighter
     except ImportError as e:
@@ -111,16 +191,14 @@ def _read_lighter(reader_name: str, paths: PathArg, **kwargs) -> pd.DataFrame:
             "LighterFeed needs the research readers (tools.readers.lighter). "
             "Run from the research/ directory or add the repo root to sys.path."
         ) from e
-    return getattr(lighter, reader_name)(paths, **kwargs).load()
+    return lighter
 
 
-def _level_grid(df: pd.DataFrame, prefix: str, depth: int) -> np.ndarray:
-    """Stack columns {prefix}_1 .. {prefix}_depth into a [n, depth] grid."""
-    cols = [f"{prefix}_{i}" for i in range(1, depth + 1)]
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-        raise KeyError(
-            f"LighterFeed: LOB columns not found: {missing[:3]}... "
-            f"(expected {prefix}_1..{prefix}_{depth})"
-        )
-    return np.ascontiguousarray(df[cols].to_numpy(np.float64))
+def _read_lighter(reader_name: str, paths: PathArg, **kwargs) -> pd.DataFrame:
+    return getattr(_lighter_readers(), reader_name)(paths, **kwargs).load()
+
+
+def _as_path_list(paths: PathArg) -> list[Path]:
+    if isinstance(paths, (str, Path)):
+        return [Path(paths)]
+    return [Path(p) for p in paths]

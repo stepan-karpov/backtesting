@@ -9,8 +9,11 @@ except ImportError:
         "(requires: pip install pybind11)"
     )
 
-from .strategy import Strategy
+from .strategy import Strategy, OrderGateway
 from .backtester import Backtester
 from .feed import LighterFeed
 
-__all__ = ["Strategy", "Backtester", "OrderBook", "LighterFeed", "MAX_LOB_LEVELS"]
+__all__ = [
+    "Strategy", "OrderGateway",
+    "Backtester", "OrderBook", "LighterFeed", "MAX_LOB_LEVELS",
+]

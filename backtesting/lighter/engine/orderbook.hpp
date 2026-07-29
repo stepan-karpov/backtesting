@@ -1,6 +1,8 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <stdexcept>
+#include <string>
 
 // Compile-time cap on book depth (Lighter data has at most 30 levels).
 // The active number of levels is a runtime value (OrderBook::depth), set from
@@ -24,8 +26,10 @@ struct OrderBook {
     // ── write API ────────────────────────────────────────────────────────────
 
     // Refresh from pre-extracted row slices (row-major arrays, stride = depth).
-    void refresh(const double* bp, const double* ba,
-                 const double* ap, const double* aa, int64_t ts) noexcept {
+    // Prices/sizes arrive as float32 (the feed stores them so to halve RAM) and are
+    // widened to double here — the book and all downstream math stay double.
+    void refresh(const float* bp, const float* ba,
+                 const float* ap, const float* aa, int64_t ts) noexcept {
         for (int k = 0; k < depth; ++k) {
             bids[k] = {bp[k], ba[k]};
             asks[k] = {ap[k], aa[k]};
@@ -34,10 +38,15 @@ struct OrderBook {
     }
 
     // Consume trade volume in-place across the active levels.
-    void apply_trade(bool is_sell, double price, double amount) noexcept {
+    // Loud escalation: throws if the trade exhausts the entire loaded book — it ran
+    // through all `depth` levels (not stopped by remaining volume nor by the trade
+    // price) with volume still left. That means the feed depth is too shallow to
+    // represent this trade; better to fail than to silently drop the excess.
+    void apply_trade(bool is_sell, double price, double amount) {
         auto& lvls = is_sell ? bids : asks;
         double rem = amount;
-        for (int k = 0; k < depth; ++k) {
+        int k = 0;
+        for (; k < depth; ++k) {
             auto& l = lvls[k];
             if (rem <= 0.0) break;
             if ( is_sell && l.price < price) break;
@@ -46,6 +55,11 @@ struct OrderBook {
             l.amount -= c;
             rem      -= c;
         }
+        if (k == depth && rem > 0.0)
+            throw std::runtime_error(
+                "apply_trade: trade (price=" + std::to_string(price) +
+                ", amount=" + std::to_string(amount) + ") punched through all " +
+                std::to_string(depth) + " loaded book levels — increase LighterFeed(depth=...)");
     }
 
     // Volume queued at a specific price level (0 if not present within depth).
