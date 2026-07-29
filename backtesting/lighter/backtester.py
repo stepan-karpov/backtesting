@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .strategy import Strategy
+from .persistence import save_run
 
 try:
     from . import _engine
@@ -28,17 +29,18 @@ class Backtester:
         self.quote_log_stride = max(1, int(quote_log_stride))
 
     def run(self, strategy: Strategy, feed, output_path: str = "result") -> str:
-        """Run the simulation on `feed`; saves CSVs with prefix output_path.
+        """Run the simulation on `feed`; persist the result and return its prefix.
 
-        `feed` is any object exposing .arrays() (see LighterFeed). Returns the
-        output prefix.
+        `feed` is any object exposing .arrays() (see LighterFeed). Every run is written to
+        disk as ``{output_path}_{pnl,quotes,fills}.parquet`` (typed/binary — see
+        persistence.py); load it back with ``BacktestResult(prefix)``. The engine hands
+        its columns to Python in memory; turning them into files happens here.
         """
-        _engine.run_arrays(
+        arrays = _engine.run_arrays(
             strategy,
             **feed.arrays(),
             latency_us=self._latency_us,
             log_interval_us=self.log_interval_us,
             quote_log_stride=self.quote_log_stride,
-            output_path=output_path,
         )
-        return output_path
+        return save_run(arrays, output_path)

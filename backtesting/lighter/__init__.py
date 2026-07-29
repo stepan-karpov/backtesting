@@ -16,5 +16,5 @@ from .feed import LighterFeed
 
 __all__ = [
     "Strategy", "OrderGateway",
-    "Backtester", "OrderBook", "LighterFeed", "MAX_LOB_LEVELS",
+    "Backtester", "OrderBook", "LighterFeed", "MAX_LOB_LEVELS"
 ]

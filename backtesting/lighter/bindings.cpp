@@ -1,16 +1,3 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// bindings.cpp — THE ONLY FILE WITH PYTHON INTEROP
-//
-// Contains:
-//   1. PyStrategy  — wraps a Python strategy object, calls on_lob / on_fill
-//                    via pybind11. This is the single C++ ↔ Python seam.
-//   2. run()       — takes file paths, creates readers, runs C++ Backtester,
-//                    writes result CSVs to disk.
-//   3. pybind11 module definition.
-//
-// All business logic lives in engine/*.hpp (pure C++, no Python headers).
-// ─────────────────────────────────────────────────────────────────────────────
-
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 
@@ -26,14 +13,6 @@
 
 namespace py = pybind11;
 using namespace pybind11::literals;
-
-// ─── PyStrategy: the C++ ↔ Python seam ───────────────────────────────────────
-//
-// on_lob: one Python hop per tick — calls the strategy's _lob_step, which runs the
-//         user's imperative on_lob and returns the drained gateway queue as a list of
-//         (size, price, ttl_s, reduce_only) tuples, read by index into vector<Order>.
-//         Signed size carries the side; ttl_s is always a number (<= 0 = GTC).
-// on_fill: called with primitive args (t_us, side_str, price, size).
 
 class PyStrategy : public StrategyBase {
     py::object _lob_step;
@@ -67,24 +46,58 @@ public:
     }
 };
 
-// ─── run_arrays(): in-memory numpy arrays → C++ Backtester → CSV files ────────
-//
-// Market data arrives as pre-parsed numpy arrays (see feed.py). The venue-specific
-// parsing lives in Python; the engine only sees normalised columns.
-//
-//   lob_*   : row-major [n_lob, depth], one snapshot per row (depth = book depth
-//             the feed loaded, inferred from the array width, 1..MAX_LOB_LEVELS)
-//   trade_* : flat [n_trade], one trade per row
-//
-// c_style|forcecast guarantees contiguous, correctly-typed buffers (a copy is
-// made only if the caller passed a non-contiguous or wrong-dtype array).
+// ─── run_arrays(): in-memory numpy arrays → C++ Backtester → numpy arrays ─────
 
 using F64Array = py::array_t<double,  py::array::c_style | py::array::forcecast>;
 using F32Array = py::array_t<float,   py::array::c_style | py::array::forcecast>;
 using I64Array = py::array_t<int64_t, py::array::c_style | py::array::forcecast>;
 using U8Array  = py::array_t<uint8_t, py::array::c_style | py::array::forcecast>;
 
-static void run_arrays(
+template <class T>
+static py::array_t<T> to_np(const std::vector<T>& v) {
+    return py::array_t<T>(static_cast<py::ssize_t>(v.size()), v.data());
+}
+
+static int64_t require_valid_shapes(
+    const I64Array& lob_ts,
+    const F32Array& bid_px, const F32Array& bid_sz,
+    const F32Array& ask_px, const F32Array& ask_sz,
+    const I64Array& trade_ts,
+    const U8Array&  trade_is_sell,
+    const F64Array& trade_price, const F64Array& trade_size)
+{
+    const int64_t n_lob   = lob_ts.shape(0);
+    const int64_t n_trade = trade_ts.shape(0);
+
+    if (bid_px.ndim() != 2 || bid_px.shape(0) != n_lob)
+        throw std::runtime_error("run_arrays: bid_px must have shape [n_lob, depth]");
+    const int64_t depth = bid_px.shape(1);
+    if (depth < 1 || depth > MAX_LOB_LEVELS)
+        throw std::runtime_error(
+            "run_arrays: depth must be in [1, " + std::to_string(MAX_LOB_LEVELS) + "]");
+
+    auto require_lob_grid = [&](const F32Array& a, const char* name) {
+        if (a.ndim() != 2 || a.shape(0) != n_lob || a.shape(1) != depth)
+            throw std::runtime_error(
+                std::string("run_arrays: ") + name + " must match bid_px shape [n_lob, depth]");
+    };
+    require_lob_grid(bid_sz, "bid_sz");
+    require_lob_grid(ask_px, "ask_px");
+    require_lob_grid(ask_sz, "ask_sz");
+
+    auto require_trade_col = [&](const auto& a, const char* name) {
+        if (a.ndim() != 1 || a.shape(0) != n_trade)
+            throw std::runtime_error(
+                std::string("run_arrays: ") + name + " must have shape [n_trade]");
+    };
+    require_trade_col(trade_is_sell, "trade_is_sell");
+    require_trade_col(trade_price,   "trade_price");
+    require_trade_col(trade_size,    "trade_size");
+
+    return depth;
+}
+
+static py::dict run_arrays(
     py::object strategy,
     I64Array   lob_ts,
     F32Array   bid_px, F32Array bid_sz,
@@ -95,37 +108,12 @@ static void run_arrays(
     F64Array   trade_size,
     int64_t    latency_us,
     int64_t    log_interval_us,
-    int64_t    quote_log_stride,
-    const std::string& output_path
+    int64_t    quote_log_stride
 ) {
+    const int64_t depth   = require_valid_shapes(lob_ts, bid_px, bid_sz, ask_px, ask_sz,
+                                                 trade_ts, trade_is_sell, trade_price, trade_size);
     const int64_t n_lob   = lob_ts.shape(0);
     const int64_t n_trade = trade_ts.shape(0);
-
-    // ── book depth is whatever the feed loaded (array width) ──────────────────
-    if (bid_px.ndim() != 2 || bid_px.shape(0) != n_lob)
-        throw std::runtime_error("run_arrays: bid_px must have shape [n_lob, depth]");
-    const int64_t depth = bid_px.shape(1);
-    if (depth < 1 || depth > MAX_LOB_LEVELS)
-        throw std::runtime_error(
-            "run_arrays: depth must be in [1, " + std::to_string(MAX_LOB_LEVELS) + "]");
-
-    // ── shape checks: fail loudly rather than read out of bounds ──────────────
-    auto require_lob_grid = [&](const F32Array& a, const char* name) {
-        if (a.ndim() != 2 || a.shape(0) != n_lob || a.shape(1) != depth)
-            throw std::runtime_error(
-                std::string("run_arrays: ") + name + " must match bid_px shape [n_lob, depth]");
-    };
-    require_lob_grid(bid_sz, "bid_sz");
-    require_lob_grid(ask_px, "ask_px"); require_lob_grid(ask_sz, "ask_sz");
-
-    auto require_trade_col = [&](const auto& a, const char* name) {
-        if (a.ndim() != 1 || a.shape(0) != n_trade)
-            throw std::runtime_error(
-                std::string("run_arrays: ") + name + " must have shape [n_trade]");
-    };
-    require_trade_col(trade_is_sell, "trade_is_sell");
-    require_trade_col(trade_price,   "trade_price");
-    require_trade_col(trade_size,    "trade_size");
 
     PyStrategy           py_strat(std::move(strategy));
     PessimisticExecution exec;
@@ -141,7 +129,24 @@ static void run_arrays(
         n_trade);
 
     RunData data = bt.run(py_strat, exec, lob, trades);
-    data.save_csv(output_path);
+
+    // Hand the RunData columns back as numpy arrays (see to_np). No file I/O here —
+    // the caller (Backtester.run) decides whether to persist and in what format.
+    py::dict out;
+    out["pnl_t"]      = to_np(data.pnl_t);
+    out["pnl_v"]      = to_np(data.pnl_v);
+    out["inv_v"]      = to_np(data.inv_v);
+    out["qt_t"]       = to_np(data.qt_t);
+    out["qt_bid"]     = to_np(data.qt_bid);
+    out["qt_ask"]     = to_np(data.qt_ask);
+    out["qt_mid"]     = to_np(data.qt_mid);
+    out["fill_t"]     = to_np(data.fill_t);
+    out["fill_side"]  = to_np(data.fill_side);
+    out["fill_price"] = to_np(data.fill_price);
+    out["fill_size"]  = to_np(data.fill_size);
+    out["fill_inv"]   = to_np(data.fill_inv);
+    out["fill_mid"]   = to_np(data.fill_mid);
+    return out;
 }
 
 // ─── pybind11 module ──────────────────────────────────────────────────────────
@@ -182,7 +187,6 @@ PYBIND11_MODULE(_engine, m) {
         "lob_ts"_a,
         "bid_px"_a, "bid_sz"_a, "ask_px"_a, "ask_sz"_a,
         "trade_ts"_a, "trade_is_sell"_a, "trade_price"_a, "trade_size"_a,
-        "latency_us"_a, "log_interval_us"_a, "quote_log_stride"_a,
-        "output_path"_a
+        "latency_us"_a, "log_interval_us"_a, "quote_log_stride"_a
     );
 }

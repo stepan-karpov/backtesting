@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ...persistence import load_run
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -9,11 +11,11 @@ DARK = "plotly_dark"
 
 
 class BacktestResult:
-    """Loads C++ backtest output (3 CSVs) and reports a top-level strategy summary.
+    """Loads a persisted backtest run (3 parquet tables) and reports a strategy summary.
 
     Public interface is unchanged: ``BacktestResult(prefix, capital).summary_df()``.
     Extra knobs are optional keyword-only params with defaults, so the old call
-    still works. All the new work is private computation on the loaded CSVs.
+    still works. All the new work is private computation on the loaded tables.
 
     Two computation regimes, on purpose:
 
@@ -44,29 +46,31 @@ class BacktestResult:
         self._grid_cache = None
         self._ff_cache = None
         self._mtm_cache = None
-        self._load(prefix)
+        self._build(load_run(prefix))
 
-    def _load(self, prefix: str) -> None:
+    def _build(self, a: dict) -> None:
         def to_dt(col):
             return pd.to_datetime(np.asarray(col, np.int64), unit="us")
 
-        pnl_df = pd.read_csv(f"{prefix}_pnl.csv")
-        self.pnl = pd.Series(pnl_df["pnl"].values, index=to_dt(pnl_df["t_us"]), name="pnl")
+        self.pnl = pd.Series(
+            np.asarray(a["pnl_v"], float), index=to_dt(a["pnl_t"]), name="pnl")
         self.inventory = pd.Series(
-            pnl_df["inventory"].values, index=to_dt(pnl_df["t_us"]), name="inventory")
+            np.asarray(a["inv_v"], float), index=to_dt(a["pnl_t"]), name="inventory")
 
-        qt_df = pd.read_csv(f"{prefix}_quotes.csv")
         self.quotes = pd.DataFrame(
-            {"mid": qt_df["mid"].values, "bid": qt_df["bid"].values, "ask": qt_df["ask"].values},
-            index=to_dt(qt_df["t_us"]))
+            {"mid": np.asarray(a["qt_mid"], float),
+             "bid": np.asarray(a["qt_bid"], float),
+             "ask": np.asarray(a["qt_ask"], float)},
+            index=to_dt(a["qt_t"]))
 
-        fl_df = pd.read_csv(f"{prefix}_fills.csv")
-        self._has_mid = "mid_at_fill" in fl_df.columns
-        cols = {"side": fl_df["side"].values, "price": fl_df["price"].values,
-                "size": fl_df["size"].values, "inv_after": fl_df["inventory"].values}
-        if self._has_mid:
-            cols["mid_at_fill"] = fl_df["mid_at_fill"].values
-        self.fills = pd.DataFrame(cols, index=to_dt(fl_df["t_us"]))
+        self._has_mid = True   # the engine always emits mid_at_fill
+        side = np.array(["bid", "ask", "markout"])[np.asarray(a["fill_side"], np.int64)]
+        self.fills = pd.DataFrame(
+            {"side": side, "price": np.asarray(a["fill_price"], float),
+             "size": np.asarray(a["fill_size"], float),
+             "inv_after": np.asarray(a["fill_inv"], float),
+             "mid_at_fill": np.asarray(a["fill_mid"], float)},
+            index=to_dt(a["fill_t"]))
 
     # ── grid & fill frames ──────────────────────────────────────────────────────
 

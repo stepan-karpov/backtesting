@@ -7,7 +7,6 @@
 #include "ring_buffer.hpp"
 #include <algorithm>
 #include <cstdint>
-#include <deque>
 #include <stdexcept>
 #include <vector>
 
