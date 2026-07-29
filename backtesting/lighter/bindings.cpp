@@ -29,30 +29,26 @@ using namespace pybind11::literals;
 
 // ─── PyStrategy: the C++ ↔ Python seam ───────────────────────────────────────
 //
-// on_lob: calls the Python strategy's on_lob (imperative — no return value), then
-//         drains _collect() → list of (size, price, ttl_s, reduce_only) tuples,
-//         read by index into vector<Order>. Signed size carries the side; ttl_s is
-//         always a number (<= 0 = GTC). No per-order Python object, no attr lookups.
+// on_lob: one Python hop per tick — calls the strategy's _lob_step, which runs the
+//         user's imperative on_lob and returns the drained gateway queue as a list of
+//         (size, price, ttl_s, reduce_only) tuples, read by index into vector<Order>.
+//         Signed size carries the side; ttl_s is always a number (<= 0 = GTC).
 // on_fill: called with primitive args (t_us, side_str, price, size).
 
 class PyStrategy : public StrategyBase {
-    py::object _on_lob;
-    py::object _collect;
+    py::object _lob_step;
     py::object _on_fill;
 
 public:
     explicit PyStrategy(py::object strategy)
-        : _on_lob (strategy.attr("on_lob"))
-        , _collect(strategy.attr("_collect"))
-        , _on_fill(strategy.attr("on_fill"))
+        : _lob_step(strategy.attr("_lob_step"))
+        , _on_fill (strategy.attr("on_fill"))
     {}
 
-    std::vector<Order> on_lob(const OrderBook& ob, double inventory) override {
-        _on_lob(py::cast(&ob, py::return_value_policy::reference), inventory);
-        py::object pending = _collect();
+    void on_lob(const OrderBook& ob, double inventory, std::vector<Order>& orders) override {
+        py::object pending = _lob_step(
+            py::cast(&ob, py::return_value_policy::reference), inventory);
 
-        std::vector<Order> orders;
-        orders.reserve(py::len(pending));
         for (auto item : pending) {
             const py::tuple o = item.cast<py::tuple>();      // (size, price, ttl_s, reduce_only)
             const double  size = o[0].cast<double>();        // signed: sign = side
@@ -63,7 +59,6 @@ public:
             orders.push_back({size > 0.0, px, size < 0.0 ? -size : size,
                               ttl_us, /*expire_at=*/0, ro});
         }
-        return orders;
     }
 
     void on_fill(int64_t t_us, const Fill& f) override {
@@ -92,7 +87,7 @@ using U8Array  = py::array_t<uint8_t, py::array::c_style | py::array::forcecast>
 static void run_arrays(
     py::object strategy,
     I64Array   lob_ts,
-    F32Array   bid_px, F32Array bid_sz,   // float32 grids — half the RAM of float64
+    F32Array   bid_px, F32Array bid_sz,
     F32Array   ask_px, F32Array ask_sz,
     I64Array   trade_ts,
     U8Array    trade_is_sell,

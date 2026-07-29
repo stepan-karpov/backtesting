@@ -9,7 +9,8 @@ except ImportError:
         "(requires: pip install pybind11)"
     )
 
-from .strategy import Strategy, OrderGateway
+from .gateway import OrderGateway
+from .strategy import Strategy
 from .backtester import Backtester
 from .feed import LighterFeed
 

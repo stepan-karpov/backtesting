@@ -28,22 +28,22 @@ struct TradeEvent {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class ArrayLobReader {
-    const int64_t* _ts;
-    const float*   _bid_p;   // float32 grids (widened to double in OrderBook::refresh)
-    const float*   _bid_a;
-    const float*   _ask_p;
-    const float*   _ask_a;
-    int64_t        _n;
-    int            _depth;
-    int64_t        _i = 0;
+    const int64_t* ts_;
+    const float*   bid_p_;   // float32 grids (widened to double in OrderBook::refresh)
+    const float*   bid_a_;
+    const float*   ask_p_;
+    const float*   ask_a_;
+    int64_t        n_;
+    int            depth_;
+    int64_t        i_ = 0;
 
-    OrderBook _ob;
-    bool      _valid = false;
+    OrderBook ob_;
+    bool      valid_ = false;
 
-    void _load(int64_t i) noexcept {
-        const std::size_t off = static_cast<std::size_t>(i) * _depth;
-        _ob.refresh(_bid_p + off, _bid_a + off,
-                    _ask_p + off, _ask_a + off, _ts[i]);
+    void load(int64_t i) noexcept {
+        const std::size_t off = static_cast<std::size_t>(i) * depth_;
+        ob_.refresh(bid_p_ + off, bid_a_ + off,
+                    ask_p_ + off, ask_a_ + off, ts_[i]);
     }
 
 public:
@@ -51,23 +51,23 @@ public:
                    const float* bid_p, const float* bid_a,
                    const float* ask_p, const float* ask_a,
                    int64_t n, int depth)
-        : _ts(ts), _bid_p(bid_p), _bid_a(bid_a), _ask_p(ask_p), _ask_a(ask_a),
-          _n(n), _depth(depth) {
-        _ob.depth = depth;
-        _valid = _n > 0;
-        if (_valid) _load(0);
+        : ts_(ts), bid_p_(bid_p), bid_a_(bid_a), ask_p_(ask_p), ask_a_(ask_a),
+          n_(n), depth_(depth) {
+        ob_.depth = depth;
+        valid_ = n_ > 0;
+        if (valid_) load(0);
     }
 
-    bool             valid()     const noexcept { return _valid; }
-    int64_t          timestamp() const noexcept { return _ob.timestamp_us; }
-    OrderBook&       orderbook()       noexcept { return _ob; }
-    const OrderBook& orderbook() const noexcept { return _ob; }
-    int64_t          size()      const noexcept { return _n; }                      // total snapshots
-    int64_t          span_us()   const noexcept { return _n > 0 ? _ts[_n - 1] - _ts[0] : 0; }
+    bool             valid()     const noexcept { return valid_; }
+    int64_t          timestamp() const noexcept { return ob_.timestamp_us; }
+    OrderBook&       orderbook()       noexcept { return ob_; }
+    const OrderBook& orderbook() const noexcept { return ob_; }
+    int64_t          size()      const noexcept { return n_; }                      // total snapshots
+    int64_t          span_us()   const noexcept { return n_ > 0 ? ts_[n_ - 1] - ts_[0] : 0; }
 
     void advance() {
-        if (++_i < _n) _load(_i);
-        else           _valid = false;
+        if (++i_ < n_) load(i_);
+        else           valid_ = false;
     }
 };
 
@@ -77,38 +77,38 @@ public:
 // ─────────────────────────────────────────────────────────────────────────────
 
 class ArrayTradeReader {
-    const int64_t* _ts;
-    const uint8_t* _is_sell;
-    const double*  _price;
-    const double*  _size;
-    int64_t        _n;
-    int64_t        _i = 0;
+    const int64_t* ts_;
+    const uint8_t* is_sell_;
+    const double*  price_;
+    const double*  size_;
+    int64_t        n_;
+    int64_t        i_ = 0;
 
-    TradeEvent _ev{};
-    bool       _valid = false;
+    TradeEvent ev_{};
+    bool       valid_ = false;
 
-    void _load(int64_t i) noexcept {
-        _ev.t_us    = _ts[i];
-        _ev.is_sell = _is_sell[i] != 0;
-        _ev.price   = _price[i];
-        _ev.amount  = _size[i];
+    void load(int64_t i) noexcept {
+        ev_.t_us    = ts_[i];
+        ev_.is_sell = is_sell_[i] != 0;
+        ev_.price   = price_[i];
+        ev_.amount  = size_[i];
     }
 
 public:
     ArrayTradeReader(const int64_t* ts, const uint8_t* is_sell,
                      const double* price, const double* size, int64_t n)
-        : _ts(ts), _is_sell(is_sell), _price(price), _size(size), _n(n) {
-        _valid = _n > 0;
-        if (_valid) _load(0);
+        : ts_(ts), is_sell_(is_sell), price_(price), size_(size), n_(n) {
+        valid_ = n_ > 0;
+        if (valid_) load(0);
     }
 
-    bool              valid()     const noexcept { return _valid; }
-    int64_t           timestamp() const noexcept { return _ev.t_us; }
-    const TradeEvent& event()     const noexcept { return _ev; }
-    int64_t           size()      const noexcept { return _n; }                     // total trades
+    bool              valid()     const noexcept { return valid_; }
+    int64_t           timestamp() const noexcept { return ev_.t_us; }
+    const TradeEvent& event()     const noexcept { return ev_; }
+    int64_t           size()      const noexcept { return n_; }                     // total trades
 
     void advance() {
-        if (++_i < _n) _load(_i);
-        else           _valid = false;
+        if (++i_ < n_) load(i_);
+        else           valid_ = false;
     }
 };

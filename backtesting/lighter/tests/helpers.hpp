@@ -47,17 +47,19 @@ struct OnceStrategy : StrategyBase {         // emit `batch` on the first event 
     std::vector<Order> batch;
     bool fired = false;
     explicit OnceStrategy(std::vector<Order> b) : batch(std::move(b)) {}
-    std::vector<Order> on_lob(const OrderBook&, double) override {
-        if (fired) return {};
+    void on_lob(const OrderBook&, double, std::vector<Order>& orders) override {
+        if (fired) return;
         fired = true;
-        return batch;
+        orders.insert(orders.end(), batch.begin(), batch.end());
     }
 };
 
 struct EveryTick : StrategyBase {            // emit `batch` on every LOB event
     std::vector<Order> batch;
     explicit EveryTick(std::vector<Order> b) : batch(std::move(b)) {}
-    std::vector<Order> on_lob(const OrderBook&, double) override { return batch; }
+    void on_lob(const OrderBook&, double, std::vector<Order>& orders) override {
+        orders.insert(orders.end(), batch.begin(), batch.end());
+    }
 };
 
 // ── Tiny feed builder → contiguous arrays → Backtester → RunData.
