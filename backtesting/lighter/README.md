@@ -159,7 +159,7 @@ exchange time `T` becomes live on the book only at `T + latency_us`, as a real o
 packet would. Until then the previous quotes keep resting and matching. See *Execution
 & latency model* below.
 
-`run()` writes three parquet files (typed/binary — see `persistence.py`) and returns the
+`run()` writes four parquet files (typed/binary — see `persistence.py`) and returns the
 prefix; load them back with `BacktestResult(prefix)`:
 
 | File | Columns | Logged when |
@@ -167,6 +167,7 @@ prefix; load them back with `BacktestResult(prefix)`:
 | `{prefix}_pnl.parquet` | `t_us, pnl, inventory` | every `log_interval_sec` |
 | `{prefix}_quotes.parquet` | `t_us, bid, ask, mid` | every `quote_log_stride` LOB events |
 | `{prefix}_fills.parquet` | `t_us, side, price, size, inventory, mid_at_fill, fee` | on each fill |
+| `{prefix}_quota.parquet` | `t_us, quota` | on each placement and each fill (Lighter volume quota) |
 
 ---
 

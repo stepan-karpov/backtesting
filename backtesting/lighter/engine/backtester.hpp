@@ -6,9 +6,22 @@
 #include "strategy.hpp"
 #include "ring_buffer.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <vector>
+
+// ── Lighter volume-quota rules — UNVERIFIED, see docs/FACTS.md. Exchange-set, not
+//    tunable: balance starts at 1000; a placement (L2CreateOrder / SendTx) costs 1;
+//    a cancel costs 0; a maker fill earns floor(notional / $2), credited per fill; one
+//    placement every 15 s is free (rolling since the last free one). No cap modelled. ──
+namespace quota_rules {
+    constexpr int64_t kStart          = 1000;
+    constexpr double  kUsdPerQuota    = 2.0;
+    constexpr int64_t kFreeIntervalUs = 15'000'000;                     // 15 s
+    constexpr int64_t kNever          = std::numeric_limits<int64_t>::min();  // no free slot used yet
+}
 
 // Pure C++ replay engine. No Python types anywhere in this file.
 //
@@ -51,6 +64,8 @@ class Backtester {
     double               inventory_   = 0.0;
     int64_t              last_log_us_ = 0;
     int64_t              lob_counter_ = 0;
+    int64_t              quota_        = quota_rules::kStart;   // Lighter volume-quota balance
+    int64_t              last_free_us_ = quota_rules::kNever;   // time of the last free placement
     NonDestructingRingBuffer<InFlight> in_flight_;       // messages travelling to the exchange
     std::vector<Order>   live_;                   // orders currently resting on the book
 
@@ -77,7 +92,8 @@ public:
 
         last_log_us_ = lob_source.timestamp();
         int64_t current_timestamp_us = lob_source.timestamp();
-        
+        data.add_quota_sample(current_timestamp_us, quota_);   // seed the quota series at the start
+
         std::vector<Fill> trade_fills;
         trade_fills.reserve(40);
 
@@ -113,6 +129,7 @@ public:
         cash_ += inventory_ * fin_mid;
         data.add_fill(current_timestamp_us, Fill{2, fin_mid, -inventory_}, 0.0, fin_mid, 0.0);
         data.add_pnl_snapshot(current_timestamp_us, cash_, 0.0);
+        data.add_quota_sample(current_timestamp_us, quota_);   // final sample so the series spans the run
 
         return data;
     }
@@ -163,9 +180,16 @@ private:
 
         strategy.on_lob(order_book, inventory_, back.quotes, back.cancels);
 
-        
         for (auto& order : back.quotes) {
             order.expire_at = (order.ttl_us > 0) ? active_at + order.ttl_us : 0;
+            // Quota: each created order is one SendTx, spent at send time (this tick). One
+            // placement per free interval is free (rolling since the last free one), else −1.
+            if (last_free_us_ == quota_rules::kNever
+                    || current_timestamp_us - last_free_us_ >= quota_rules::kFreeIntervalUs)
+                last_free_us_ = current_timestamp_us;
+            else
+                quota_ -= 1;
+            data.add_quota_sample(current_timestamp_us, quota_);
         }
 
         if (lob_counter_ % quote_log_stride_ == 0) {
@@ -195,6 +219,9 @@ private:
             else             { cash_ += f.price * f.size; inventory_ -= f.size; }
             const double fee = fee_rate_ * f.price * f.size;   // fraction of notional
             cash_ -= fee;                                      // fee is always a cost
+            // Quota: a maker fill earns floor(notional / $2), credited per fill.
+            quota_ += static_cast<int64_t>(std::floor(f.price * f.size / quota_rules::kUsdPerQuota));
+            data.add_quota_sample(current_timestamp_us, quota_);
             data.add_fill(current_timestamp_us, f, inventory_, order_book.mid(), fee);
             strategy.on_fill(current_timestamp_us, f);
         }

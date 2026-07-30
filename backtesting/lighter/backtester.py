@@ -36,7 +36,7 @@ class Backtester:
         """Run the simulation on `feed`; persist the result and return its prefix.
 
         `feed` is any object exposing .arrays() (see LighterFeed). Every run is written to
-        disk as ``{output_path}_{pnl,quotes,fills}.parquet`` (typed/binary — see
+        disk as ``{output_path}_{pnl,quotes,fills,quota}.parquet`` (typed/binary — see
         persistence.py); load it back with ``BacktestResult(prefix)``. The engine hands
         its columns to Python in memory; turning them into files happens here.
         """

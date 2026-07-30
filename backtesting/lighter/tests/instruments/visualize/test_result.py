@@ -10,9 +10,15 @@ from backtesting.lighter.persistence import save_run
 from backtesting.lighter.instruments.visualize import BacktestResult
 
 
-def _result(tmp_path, *, pnl, quotes, fills):
-    """Persist a hand-built run (3 array groups → 14 columns) and load it back."""
-    save_run({**pnl, **quotes, **fills}, str(tmp_path / "run"))
+def _quota(pnl):
+    """A trivial flat quota stream spanning the run — most tests don't exercise quota."""
+    t = np.asarray(pnl["pnl_t"], np.int64)
+    return dict(quota_t=np.array([t[0], t[-1]], np.int64), quota_v=np.array([1000, 1000], np.int64))
+
+
+def _result(tmp_path, *, pnl, quotes, fills, quota=None):
+    """Persist a hand-built run (4 array groups) and load it back."""
+    save_run({**pnl, **quotes, **fills, **(quota or _quota(pnl))}, str(tmp_path / "run"))
     return BacktestResult(str(tmp_path / "run"))
 
 
@@ -185,6 +191,7 @@ def _scenario(tmp_path, *, secs, inv, mid, pnl, fills, bid=None, ask=None):
         fill_inv=np.array([f[4] for f in fills], float),
         fill_mid=np.array([f[5] for f in fills], float),
         fill_fee=np.zeros(len(fills)),
+        quota_t=np.array([t[0], t[-1]], np.int64), quota_v=np.array([1000, 1000], np.int64),
     ), str(tmp_path / "sc"))
     return BacktestResult(str(tmp_path / "sc")).summary()
 
@@ -319,3 +326,24 @@ def test_summary_df_and_plots_smoke(tmp_path):
     assert "value" in df.columns
     assert isinstance(r.plot(), go.Figure)
     assert isinstance(r.plot_price(), go.Figure)
+
+
+# ── volume-quota metrics: exact min/max, time-weighted average of the step series ──
+def test_quota_metrics_from_step_series(tmp_path):
+    # quota holds 1000 over [0,10s), 990 over [10s,30s), then a 1050 endpoint sample.
+    span = np.array([0, 30]) * 1_000_000
+    m = _result(
+        tmp_path,
+        pnl=dict(pnl_t=span, pnl_v=np.array([0.0, 0.0]), inv_v=np.array([0.0, 0.0])),
+        quotes=dict(qt_t=span, qt_mid=np.array([100.0, 100.0]),
+                    qt_bid=np.array([99.9, 99.9]), qt_ask=np.array([100.1, 100.1])),
+        fills=dict(fill_t=np.array([30]) * 1_000_000, fill_side=np.array([2], np.int32),
+                   fill_price=np.array([100.0]), fill_size=np.array([0.0]),
+                   fill_inv=np.array([0.0]), fill_mid=np.array([100.0]), fill_fee=np.array([0.0])),
+        quota=dict(quota_t=np.array([0, 10, 30]) * 1_000_000,
+                   quota_v=np.array([1000, 990, 1050], np.int64)),
+    ).summary()
+    assert m["quota_min"] == 990.0
+    assert m["quota_max"] == 1050.0
+    # 1000 for 10 s + 990 for 20 s, over 30 s (the 1050 endpoint carries zero width)
+    assert m["quota_time_avg"] == pytest.approx((1000 * 10 + 990 * 20) / 30)

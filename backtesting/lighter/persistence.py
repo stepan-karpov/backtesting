@@ -21,6 +21,7 @@ _QUOTE_COLS = {"t_us": "qt_t", "bid": "qt_bid", "ask": "qt_ask", "mid": "qt_mid"
 _FILL_COLS  = {"t_us": "fill_t", "side": "fill_side", "price": "fill_price",
                "size": "fill_size", "inventory": "fill_inv", "mid_at_fill": "fill_mid",
                "fee": "fill_fee"}
+_QUOTA_COLS = {"t_us": "quota_t", "quota": "quota_v"}
 
 
 def save_run(arrays: dict, prefix: str) -> str:
@@ -30,6 +31,7 @@ def save_run(arrays: dict, prefix: str) -> str:
     frame(_PNL_COLS).to_parquet(f"{prefix}_pnl.parquet", index=False)
     frame(_QUOTE_COLS).to_parquet(f"{prefix}_quotes.parquet", index=False)
     frame(_FILL_COLS).to_parquet(f"{prefix}_fills.parquet", index=False)
+    frame(_QUOTA_COLS).to_parquet(f"{prefix}_quota.parquet", index=False)
     return prefix
 
 
@@ -45,7 +47,7 @@ def load_run(prefix: str) -> dict:
             return pd.read_csv(csv)
         raise FileNotFoundError(f"no {parquet} nor {csv}")
 
-    pnl, quotes, fills = read("pnl"), read("quotes"), read("fills")
+    pnl, quotes, fills, quota = read("pnl"), read("quotes"), read("fills"), read("quota")
 
     side = fills["side"].to_numpy()
     if side.dtype.kind in "OUS":                     # legacy CSV stored side as a string
@@ -54,5 +56,6 @@ def load_run(prefix: str) -> dict:
     out = {key: pnl[name].to_numpy()    for name, key in _PNL_COLS.items()}
     out |= {key: quotes[name].to_numpy() for name, key in _QUOTE_COLS.items()}
     out |= {key: fills[name].to_numpy()  for name, key in _FILL_COLS.items() if name != "side"}
+    out |= {key: quota[name].to_numpy()  for name, key in _QUOTA_COLS.items()}
     out["fill_side"] = side
     return out

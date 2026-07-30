@@ -383,3 +383,37 @@ TEST(Backtester, PrematureCancelBeforeCreateIsInert) {
     RunData d = f.run(s, 0);
     EXPECT_EQ(n_side(d, 0), 1);                         // premature cancel missed; order 1 rests & fills
 }
+
+// ── volume quota: placements spend it (one free per 15 s), maker fills earn floor($/2) ──
+struct CreateEachTick : StrategyBase {      // create one bid on the first `until` LOB events
+    int k = 0, until;
+    explicit CreateEachTick(int until_) : until(until_) {}
+    void on_lob(const OrderBook&, double, std::vector<Order>& orders,
+                std::vector<uint64_t>&) override {
+        if (k < until) orders.push_back(bid(100.0, 5.0, 0, false, static_cast<uint64_t>(k + 1)));
+        ++k;
+    }
+};
+
+// Four placements at 0 / 5 / 10 / 16 s: the free slot (rolling ≥15 s) covers the 0 s and
+// 16 s ones, so only the 5 s and 10 s placements each cost 1 → 1000 → 998.
+TEST(Backtester, QuotaCreatesSpendOneWithAFreeSlotEvery15s) {
+    Feed f;
+    for (int64_t t : {int64_t{0}, int64_t{5'000'000}, int64_t{10'000'000}, int64_t{16'000'000}})
+        f.lob(t, 100.0, 0.0, 101.0, 0.0);
+    CreateEachTick s(4);
+    RunData d = f.run(s, 0);
+    ASSERT_FALSE(d.quota_v.empty());
+    EXPECT_EQ(d.quota_v.front(), 1000);   // seed at the run start
+    EXPECT_EQ(d.quota_v.back(), 998);     // two paid placements, two free
+}
+
+// A maker fill of notional $300 earns floor(300 / 2) = 150; the sole placement is free.
+TEST(Backtester, QuotaFillEarnsFloorOfNotionalOverTwoDollars) {
+    Feed f;
+    f.lob(0, 100.0, 0.0, 101.0, 0.0)
+     .trade(100, /*sell=*/true, 100.0, 3.0);          // fills our bid@100 for 3 → notional 300
+    OnceStrategy s({bid(100.0, 5.0, 0, false, 1)});
+    RunData d = f.run(s, 0);
+    EXPECT_EQ(d.quota_v.back(), 1150);                // 1000 (free placement) + 150 (fill)
+}

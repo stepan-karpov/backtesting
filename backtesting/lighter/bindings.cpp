@@ -153,6 +153,8 @@ static py::dict run_arrays(
     out["fill_inv"]   = to_np(data.fill_inv);
     out["fill_mid"]   = to_np(data.fill_mid);
     out["fill_fee"]   = to_np(data.fill_fee);
+    out["quota_t"]    = to_np(data.quota_t);
+    out["quota_v"]    = to_np(data.quota_v);
     return out;
 }
 

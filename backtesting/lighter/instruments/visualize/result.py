@@ -72,6 +72,12 @@ class BacktestResult:
              "fee": np.asarray(a["fill_fee"], float)},   # per-fill fee $ (engine, net PnL)
             index=to_dt(a["fill_t"]))
 
+        # Lighter volume-quota balance, sampled by the engine at every event that spent or
+        # earned it (a placement −1, a fill +floor(notional/$2), one free placement / 15 s).
+        # A step series: the balance holds between samples.
+        self.quota = pd.Series(
+            np.asarray(a["quota_v"], np.int64), index=to_dt(a["quota_t"]), name="quota")
+
     # ── grid & fill frames ──────────────────────────────────────────────────────
 
     @staticmethod
@@ -442,6 +448,20 @@ class BacktestResult:
         # markout horizon is a market state — always as-of from the grid
         notes.setdefault("markout_30s (bps)", "horizon mid: grid as-of")
 
+        # Lighter volume-quota. A step series → min / max are exact; the average is
+        # time-weighted (each sample's value holds until the next). The min is the headroom
+        # signal: how deep the balance ran, negative = would have been throttled live.
+        qv = self.quota.to_numpy(dtype=float)
+        if len(qv):
+            v["quota_min"] = float(qv.min())
+            v["quota_max"] = float(qv.max())
+            qt = self.quota.index.asi8.astype(np.float64)
+            span = qt[-1] - qt[0]
+            v["quota_time_avg"] = (float(np.sum(qv[:-1] * np.diff(qt)) / span)
+                                   if len(qv) > 1 and span > 0 else float(qv[0]))
+        else:
+            v["quota_min"] = v["quota_max"] = v["quota_time_avg"] = np.nan
+
         if not self._has_mid:
             notes["capture_share_of_variance"] = "fill-aware unavailable (no mid_at_fill); naive grid d_mtm"
             mnote = "needs mid_at_fill (rebuild engine / rerun)"
@@ -524,6 +544,9 @@ class BacktestResult:
             ("Ops", "two_sided_uptime (%)",           fmt("a2", "two_sided_uptime_pct")),
             ("Ops", "quote_updates/min p50",          fmt("a2", "quote_updates_min_p50")),
             ("Ops", "quote_updates/min p95",          fmt("a2", "quote_updates_min_p95")),
+            ("Quota", "quota_min",                    fmt("count", "quota_min")),
+            ("Quota", "quota_max",                    fmt("count", "quota_max")),
+            ("Quota", "quota_time_avg",               fmt("a2", "quota_time_avg")),
         ]
 
         idx = pd.MultiIndex.from_tuples([(g_, m_) for g_, m_, _ in spec], names=["group", "metric"])
@@ -590,15 +613,19 @@ class BacktestResult:
             signed        = trade_fills["side"].map({"bid": 1.0, "ask": -1.0})
             cum_imbalance = signed.cumsum().resample(resample).last().dropna()
 
+        # --- Volume-quota balance (step series; hold the value between samples) ---
+        quota_ds = self.quota.resample(resample).last().ffill().dropna()
+
         fig = make_subplots(
-            rows=4, cols=1, shared_xaxes=True,
-            row_heights=[0.15, 0.30, 0.25, 0.30],
-            vertical_spacing=0.06,
+            rows=5, cols=1, shared_xaxes=True,
+            row_heights=[0.13, 0.27, 0.20, 0.20, 0.20],
+            vertical_spacing=0.05,
             subplot_titles=(
                 f"Quote offset from mid ({ylabel_off})",
                 "PnL",
                 "Inventory",
                 "Cumulative fill imbalance (bid fills − ask fills)",
+                "Volume quota",
             ),
         )
 
@@ -646,6 +673,14 @@ class BacktestResult:
                 mode="lines", name="cum imbalance",
                 line=dict(color="magenta")), row=4, col=1)
             fig.add_hline(y=0, line=dict(width=0.5, dash="dot", color="gray"), row=4, col=1)
+
+        if len(quota_ds):
+            fig.add_trace(go.Scatter(
+                x=quota_ds.index, y=quota_ds.values,
+                mode="lines", name="quota", line_shape="hv",
+                line=dict(color="gold", width=1.5)), row=5, col=1)
+            fig.add_hline(y=0, line=dict(width=0.5, dash="dot", color="gray"), row=5, col=1)
+            fig.update_yaxes(title_text="quota", row=5, col=1)
 
         fig.update_layout(
             template=DARK, height=height, showlegend=True,
