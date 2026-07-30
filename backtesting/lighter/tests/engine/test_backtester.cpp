@@ -24,6 +24,27 @@ TEST(Backtester, LatencyGating) {
     }
 }
 
+// ── latency is monotone: each +1000 µs blanks exactly one more of four trades.
+//    One resting bid (queue 0 → fills any sell), quoted every tick; four sells at
+//    500/1500/2500/3500 µs. Stronger than the binary LatencyGating case above:
+//    fills fall 4→3→2→1 as the lead-in window [0, latency) swallows one more sell. ──
+TEST(Backtester, LatencyMonotonicallyBlanksTrades) {
+    Feed f;
+    for (int64_t t = 0; t < 5000; t += 1000)
+        f.lob(t, 100.0, 0.0, 101.0, 1.0);              // bid@100 queue 0
+    for (int64_t t : {500, 1500, 2500, 3500})
+        f.trade(t, /*sell=*/true, 100.0, 1.0);
+
+    const int expected[] = {4, 3, 2, 1};
+    int64_t latency = 0;
+    for (int e : expected) {
+        EveryTick s({bid(100.0, 1.0)});                // GTC bid, re-quoted every tick
+        RunData d = f.run(s, latency);
+        EXPECT_EQ(n_side(d, 0), e) << "latency_us=" << latency;
+        latency += 1000;
+    }
+}
+
 // ── GTT expiry: an order is reaped at expire_at (landing + ttl) ──
 TEST(Backtester, GttExpiry) {
     // ttl 1000 µs, latency 0 → lands at t=0, expires at t=1000
