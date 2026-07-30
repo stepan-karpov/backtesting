@@ -3,12 +3,12 @@
 // Python-free, so tests #include them directly and assert on in-memory RunData —
 // no pybind, no CSV, no filesystem.
 
-#include "../engine/backtester.hpp"
-#include "../engine/execution.hpp"
-#include "../engine/orderbook.hpp"
-#include "../engine/reader.hpp"
-#include "../engine/result.hpp"
-#include "../engine/strategy.hpp"
+#include "../../engine/backtester.hpp"
+#include "../../engine/execution.hpp"
+#include "../../engine/orderbook.hpp"
+#include "../../engine/reader.hpp"
+#include "../../engine/result.hpp"
+#include "../../engine/strategy.hpp"
 
 #include <cstdint>
 #include <utility>

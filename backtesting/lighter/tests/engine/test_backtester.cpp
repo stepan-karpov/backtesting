@@ -4,6 +4,8 @@
 
 #include "helpers.hpp"
 #include <gtest/gtest.h>
+#include <cmath>
+#include <stdexcept>
 
 using namespace t;
 
@@ -133,4 +135,94 @@ TEST(Backtester, Deterministic) {
     ASSERT_EQ(a.pnl_v.size(), b.pnl_v.size());
     for (std::size_t i = 0; i < a.pnl_v.size(); ++i)
         EXPECT_DOUBLE_EQ(a.pnl_v[i], b.pnl_v[i]);
+}
+
+// ── a feed with no LOB snapshots fails loudly rather than running on nothing ──
+TEST(Backtester, EmptyLobThrows) {
+    Feed f;                                    // no .lob() → 0 snapshots
+    f.trade(0, true, 100.0, 1.0);              // trades but no book
+    OnceStrategy s({});
+    EXPECT_THROW(f.run(s, /*latency=*/0), std::runtime_error);
+}
+
+// ── trades-first tie-break: at equal timestamps the trade is processed BEFORE the LOB
+//    snapshot's quote is logged, so a fill that empties our resting bid shows up as
+//    "no live bid" in that tick's quote (LOB-first would log bid=100 before the removal). ──
+TEST(Backtester, TradesProcessedBeforeLobAtEqualTimestamp) {
+    Feed f;
+    f.lob(0, 100.0, 5.0, 101.0, 5.0)           // our bid@100 rests here
+     .trade(10, /*sell=*/true, 100.0, 100.0)   // t=10: a big sell that clears the bid
+     .lob(10, 100.0, 5.0, 101.0, 5.0);         // AND a LOB snapshot at the same t=10
+    OnceStrategy s({bid(100.0, 5.0)});
+    RunData d = f.run(s, /*latency=*/0);
+    EXPECT_EQ(n_side(d, 0), 1);                 // the equal-ts trade filled the bid
+
+    ASSERT_EQ(d.qt_t.size(), 2u);               // quotes logged at t=0 and t=10
+    EXPECT_EQ(d.qt_t[1], 10);
+    EXPECT_TRUE(std::isnan(d.qt_bid[1]));       // bid already removed by the trade → NaN
+}
+
+// ── quote_log_stride: only every Nth LOB snapshot is written to the quote log ──
+TEST(Backtester, QuoteLogStrideSkipsSnapshots) {
+    Feed f;
+    for (int i = 0; i < 10; ++i) f.lob(i, 100.0, 5.0, 101.0, 5.0);
+    OnceStrategy s({});                         // no orders; only the quote log matters here
+    RunData d = f.run(s, /*latency=*/0, /*log_interval_us=*/10'000'000, /*quote_stride=*/3);
+    EXPECT_EQ(d.qt_t.size(), 4u);               // logged at lob_counter 0,3,6,9 of 10
+}
+
+// ── pnl snapshots honor log_interval: a coarser interval writes fewer snapshots ──
+TEST(Backtester, PnlSnapshotHonorsLogInterval) {
+    Feed f;
+    for (int i = 0; i <= 10; ++i) f.lob(i * 1'000'000, 100.0, 5.0, 101.0, 5.0);   // 0..10s, 1s apart
+    OnceStrategy sf({});
+    RunData fine   = f.run(sf, 0, /*log_interval_us=*/1'000'000, 1);   // snapshot ~every 1s
+    OnceStrategy sc({});
+    RunData coarse = f.run(sc, 0, /*log_interval_us=*/5'000'000, 1);   // snapshot ~every 5s
+    EXPECT_GT(fine.pnl_t.size(), coarse.pnl_t.size());
+    EXPECT_GE(fine.pnl_t.size(), 10u);
+    EXPECT_LE(coarse.pnl_t.size(), 4u);
+}
+
+// ── the ASK/sell side end-to-end: an aggressive buy lifts our resting ask (side 1),
+//    cash rises and inventory goes short (mirror of the bid-fill accounting). ──
+TEST(Backtester, AskFillAccounting) {
+    Feed f;
+    f.lob(0, 100.0, 5.0, 101.0, 5.0)
+     .trade(10, /*sell=*/false, 101.0, 100.0);   // aggressive BUY hits our ask@101
+    OnceStrategy s({ask(101.0, 5.0)});
+    RunData d = f.run(s, /*latency=*/0);
+    EXPECT_EQ(n_side(d, 1), 1);                   // an ASK fill occurred (process_trade else-branch)
+    ASSERT_FALSE(d.fill_inv.empty());
+    EXPECT_LT(d.fill_inv[0], 0.0);               // inventory went short after selling
+}
+
+// ── quote log scans BOTH sides of the live set, with multiple orders per side ──
+TEST(Backtester, QuoteLogScansBothSides) {
+    Feed f;
+    for (int i = 0; i < 4; ++i) f.lob(i, 100.0, 5.0, 101.0, 5.0);
+    EveryTick s({bid(100.0, 5.0, /*ttl=*/0), ask(101.0, 5.0, 0)});   // GTC bid + ask every tick
+    RunData d = f.run(s, /*latency=*/0);
+    ASSERT_FALSE(d.qt_t.empty());
+    const std::size_t last = d.qt_t.size() - 1;   // by the last tick both sides have rested
+    EXPECT_DOUBLE_EQ(d.qt_bid[last], 100.0);      // best of the live bids (scan hits line 157)
+    EXPECT_DOUBLE_EQ(d.qt_ask[last], 101.0);      // best of the live asks (scan hits line 158)
+}
+
+// ── defensive: quote_log_stride < 1 is clamped to 1 (logs every snapshot) ──
+TEST(Backtester, StrideBelowOneClampsToOne) {
+    Feed f;
+    for (int i = 0; i < 5; ++i) f.lob(i, 100.0, 5.0, 101.0, 5.0);
+    OnceStrategy s({});
+    RunData d = f.run(s, /*latency=*/0, /*log_interval_us=*/10'000'000, /*quote_stride=*/0);
+    EXPECT_EQ(d.qt_t.size(), 5u);                 // stride 0 → 1 → every snapshot logged
+}
+
+// ── defensive: log_interval <= 0 uses the fallback presize and snapshots every event ──
+TEST(Backtester, ZeroLogIntervalSnapshotsEveryEvent) {
+    Feed f;
+    for (int i = 0; i < 5; ++i) f.lob(i, 100.0, 5.0, 101.0, 5.0);
+    OnceStrategy s({});
+    RunData d = f.run(s, /*latency=*/0, /*log_interval_us=*/0, /*quote_stride=*/1);
+    EXPECT_GE(d.pnl_t.size(), 5u);                // ts − last_log ≥ 0 always → snapshot per event
 }

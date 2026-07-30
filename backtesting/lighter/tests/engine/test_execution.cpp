@@ -109,3 +109,57 @@ TEST(Execution, ReduceOnlyAskFillsCappedWhenLong) {
     EXPECT_EQ(f[0].side, 1);
     EXPECT_DOUBLE_EQ(f[0].size, 2.0);
 }
+
+// ── reduce-only, cap larger than the order → the whole order fills, uncapped ──
+TEST(Execution, ReduceOnlyBidFillWithinCapNotCapped) {
+    OrderBook ob = make_book({{100.0, 0.0}}, {{101.0, 0.0}});
+    std::vector<Order> live{bid(100.0, 5.0, 0, /*ro=*/true)};
+    auto f = match_once(live, ob, true, 100.0, 100.0, /*inv=*/-10.0);  // cap 10 > fill 5
+    ASSERT_EQ(f.size(), 1u);
+    EXPECT_DOUBLE_EQ(f[0].size, 5.0);              // not capped (fill ≤ cap)
+    EXPECT_TRUE(live.empty());
+}
+
+TEST(Execution, ReduceOnlyAskFillWithinCapNotCapped) {
+    OrderBook ob = make_book({{99.0, 0.0}}, {{100.0, 0.0}});
+    std::vector<Order> live{ask(100.0, 5.0, 0, true)};
+    auto f = match_once(live, ob, false, 100.0, 100.0, /*inv=*/+10.0); // cap 10 > fill 5
+    ASSERT_EQ(f.size(), 1u);
+    EXPECT_DOUBLE_EQ(f[0].size, 5.0);
+    EXPECT_TRUE(live.empty());
+}
+
+// ── reduce-only ask mirror of the skip: flat or short → nothing to reduce (cap ≤ 0) ──
+TEST(Execution, ReduceOnlyAskSkippedWhenNotLong) {
+    OrderBook ob = make_book({{99.0, 0.0}}, {{100.0, 0.0}});
+    std::vector<Order> flat{ask(100.0, 5.0, 0, true)};
+    EXPECT_TRUE(match_once(flat, ob, false, 100.0, 100.0, /*inv=*/0.0).empty());
+
+    OrderBook ob2 = make_book({{99.0, 0.0}}, {{100.0, 0.0}});
+    std::vector<Order> shrt{ask(100.0, 5.0, 0, true)};
+    EXPECT_TRUE(match_once(shrt, ob2, false, 100.0, 100.0, /*inv=*/-3.0).empty());
+}
+
+// ── ask mirrors of the no-fill / price-gating paths ──
+TEST(Execution, AskNoFillWhenTradeBelowQueue) {
+    OrderBook ob = make_book({{99.0, 10.0}}, {{100.0, 10.0}});
+    std::vector<Order> live{ask(100.0, 5.0)};
+    auto f = match_once(live, ob, false, 100.0, 8.0, 0.0);   // buy 8 ≤ ask-queue 10
+    EXPECT_TRUE(f.empty());
+    EXPECT_DOUBLE_EQ(live[0].size, 5.0);
+}
+
+TEST(Execution, PriceGatingBuyBelowOrder) {
+    OrderBook ob = make_book({{99.0, 0.0}}, {{100.0, 0.0}});
+    std::vector<Order> live{ask(100.0, 5.0)};
+    auto f = match_once(live, ob, false, 99.0, 100.0, 0.0);  // buy @99 < ask @100
+    EXPECT_TRUE(f.empty());
+}
+
+// ── a zero-size order is skipped by the guard at the top of the match loop ──
+TEST(Execution, ZeroSizeOrderSkipped) {
+    OrderBook ob = make_book({{100.0, 0.0}}, {{101.0, 0.0}});
+    std::vector<Order> live{bid(100.0, 0.0)};                // size 0
+    auto f = match_once(live, ob, true, 100.0, 100.0, 0.0);
+    EXPECT_TRUE(f.empty());                                  // o.size ≤ 0 → continue
+}

@@ -169,7 +169,13 @@ class BacktestResult:
             return term_start + term_mid + term_end
 
         per_sec = fdf.groupby("sec", sort=True)[["m", "inv", "inv_before", "M_s", "M_next"]].apply(_sec)
-        d.loc[per_sec.index] = per_sec.values
+        # A fill can land before the first PnL snapshot (or after the last), so its second
+        # falls outside the PnL-derived grid — assign only the in-grid seconds instead of
+        # letting `.loc` raise KeyError. The exact checkpoint decomposition still counts
+        # such a fill; only its grid-MtM contribution is dropped (a slightly larger
+        # inv_mtm_grid_error for those rare boundary fills, never a crash).
+        in_grid = per_sec.index.isin(d.index)
+        d.loc[per_sec.index[in_grid]] = per_sec.values[in_grid]
         # d is indexed by each interval's LEFT boundary [s, s+1); shift to the RIGHT
         # boundary so it aligns with ΔPnL(t)=pnl(t)-pnl(t-1) and the naive diff convention.
         self._mtm_cache = d.shift(1)
