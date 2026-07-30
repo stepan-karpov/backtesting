@@ -182,7 +182,23 @@ PYBIND11_MODULE(_engine, m) {
                 r.append(row);
             }
             return r;
-        });
+        })
+        // Summed resting amount of the top-n levels, computed C++-side and returned as a
+        // single double — the hot path pays no per-level Python allocation (unlike bids/
+        // asks, which materialise the whole depth as nested lists on every access). n is
+        // clamped to the active depth (both sides share ob.depth); n <= 0 sums nothing.
+        .def("bid_volume", [](const OrderBook& ob, int n) {
+            if (n > ob.depth) n = ob.depth;
+            double v = 0.0;
+            for (int k = 0; k < n; ++k) v += ob.bids[k].amount;
+            return v;
+        }, py::arg("n") = 1)
+        .def("ask_volume", [](const OrderBook& ob, int n) {
+            if (n > ob.depth) n = ob.depth;
+            double v = 0.0;
+            for (int k = 0; k < n; ++k) v += ob.asks[k].amount;
+            return v;
+        }, py::arg("n") = 1);
 
     m.def("run_arrays", &run_arrays,
         "strategy"_a,

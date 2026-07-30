@@ -41,7 +41,7 @@ feed = LighterFeed(lob_paths, trades_paths)   # parquet + zst → normalised arr
 bt   = Backtester(log_interval_sec=10.0)
 prefix = bt.run(MyStrategy(), feed, output_path="results/my_run")
 
-r = BacktestResult(prefix, capital=1000.0)
+r = BacktestResult(prefix)
 display(r.summary_df())
 r.plot().show()
 ```
@@ -134,29 +134,36 @@ Backtester(
     latency_us: int = 0,          # round-trip order latency (µs)
     log_interval_sec: float = 10.0,
     quote_log_stride: int = 50,    # log quotes every N LOB events
+    fee_bps: float = 0.0,          # per-fill taker/maker fee, bps of notional
 )
 prefix = bt.run(strategy, feed, output_path="results/my_run")
 ```
+
+`fee_bps` charges `fee_bps·1e-4·price·size` from cash on **every real fill**, online in
+the engine, so the persisted PnL is **net of fees** (the final markout close is a
+valuation mark and pays none). The fee is baked into the run — a different tier is a
+different run. `fee_bps = 0` reproduces the gross, fee-free result.
 
 `latency_us` is the **round-trip** latency: a quote decided reacting to an event at
 exchange time `T` becomes live on the book only at `T + latency_us`, as a real order
 packet would. Until then the previous quotes keep resting and matching. See *Execution
 & latency model* below.
 
-`run()` writes three CSV files and returns the prefix:
+`run()` writes three parquet files (typed/binary — see `persistence.py`) and returns the
+prefix; load them back with `BacktestResult(prefix)`:
 
 | File | Columns | Logged when |
 |---|---|---|
-| `{prefix}_pnl.csv` | `t_us, pnl, inventory` | every `log_interval_sec` |
-| `{prefix}_quotes.csv` | `t_us, bid, ask, mid` | every `quote_log_stride` LOB events |
-| `{prefix}_fills.csv` | `t_us, side, price, size, inventory` | on each fill |
+| `{prefix}_pnl.parquet` | `t_us, pnl, inventory` | every `log_interval_sec` |
+| `{prefix}_quotes.parquet` | `t_us, bid, ask, mid` | every `quote_log_stride` LOB events |
+| `{prefix}_fills.parquet` | `t_us, side, price, size, inventory, mid_at_fill, fee` | on each fill |
 
 ---
 
 ## BacktestResult API
 
 ```python
-r = BacktestResult(prefix, capital=1000.0)
+r = BacktestResult(prefix)
 r.summary()      # dict: total_pnl, sharpe_annualized, max_drawdown, n_fills, ...
 r.summary_df()   # MultiIndex DataFrame (PnL / Fills / Inventory)
 r.plot(tick_size=None)  # 4-panel Plotly figure (tick_size scales quote offsets)
@@ -173,18 +180,20 @@ backtesting/lighter/
   __init__.py        # exports: Strategy, OrderGateway, Backtester, ...
   strategy.py        # Strategy base + OrderGateway (create_order)
   feed.py            # LighterFeed: parquet/zst → normalised numpy arrays
-  backtester.py      # Thin wrapper: calls _engine.run_arrays(), returns prefix
+  backtester.py      # Thin wrapper: calls _engine.run_arrays(), persists, returns prefix
+  persistence.py     # save_run / load_run: run arrays ↔ {prefix}_*.parquet
   bindings.cpp       # THE ONLY file with pybind11 — PyStrategy + run_arrays()
-  Makefile           # clang++ -O3 -std=c++17 → _engine*.so
+  Makefile           # clang++ -O3 -std=c++17 → _engine*.so; make test-all runs the suite
   engine/
     orderbook.hpp    # OrderBook: refresh(), apply_trade(), queue_at()
     execution.hpp    # Order, Fill, PessimisticExecution
     strategy.hpp     # StrategyBase abstract class (pure C++)
     reader.hpp       # ArrayLobReader, ArrayTradeReader — walk in-memory arrays
     backtester.hpp   # Two-pointer merge loop + latency in-flight queue
-    result.hpp       # RunData accumulator + save_csv(prefix)
+    result.hpp       # RunData accumulator (returns column arrays to Python)
   instruments/
-    visualize/       # BacktestResult: reads CSVs → summary_df() + plot()
+    visualize/       # BacktestResult: reads parquet → summary_df() + plot()
+  tests/             # engine/*.cpp (GoogleTest) + *.py (pytest) — mirror the package
 ```
 
 ---
@@ -213,17 +222,20 @@ replace-all), then reaps any order whose GTT lifetime has elapsed. A GTT order's
 Several batches can be in flight at once; the live set keeps resting and matching in
 the meantime. With `latency_us = 0` orders are live from the next event onward.
 
-**Matching** (`PessimisticExecution`): each live order is assumed last-in-queue at its
-price level — a fill triggers only when the trade volume exceeds the LOB queue ahead of
-the order (`trade_amount − queue_at(price)`). All resting levels are matched against the
-trade independently; partial fills keep their remainder resting.
+**Matching** (`PessimisticExecution`): a trade at the order's **own price** already
+counts — a bid matches a sell with `trade_price ≤ bid`, an ask a buy with
+`trade_price ≥ ask`; **no strict pierce below/above the quote is required**. Given a
+qualifying trade, each live order is assumed last-in-queue at its price level, so a fill
+triggers only when the trade volume exceeds the LOB queue ahead of the order
+(`trade_amount − queue_at(price)`). All resting levels are matched against the trade
+independently; partial fills keep their remainder resting.
 
 ---
 
-## Known limitations (no-fee model)
+## Known limitations
 
-The simulation is fee-free and models fills correctly for passive quoting at/behind the
-touch. Be aware of the current bounds:
+Fills are modelled correctly for passive quoting at/behind the touch, and trading fees
+are charged online (`Backtester(fee_bps=…)`; net PnL). Be aware of the current bounds:
 
 - **Quotes inside the spread fill trivially.** `queue_at` returns 0 for a price not on a
   book level, so an order posted strictly inside the spread has zero queue ahead and
@@ -233,7 +245,10 @@ touch. Be aware of the current bounds:
 - **reduce-only uses start-of-trade inventory.** A reduce-only order is capped against
   `inventory` as it stood when the trade arrived, so several reduce-only fills within
   one trade can jointly over-reduce (flip the sign). A corollary of the overfill caveat.
-- **Not modelled yet:** maker/taker fees, latency jitter, nonce-based queue position,
-  tick-size rounding, cancel/modify (create-only MVP).
+- **Not modelled yet:** latency jitter, nonce-based queue position, tick-size rounding,
+  cancel/modify (create-only MVP). Fees are a flat per-fill `fee_bps`, not a tiered or
+  maker/taker-split schedule.
 
-Engine behaviour is checked in `research/exchanges/lighter/BacktestingChecks.ipynb`.
+Engine behaviour is checked by the test suite under `tests/` — C++ GoogleTest
+(`tests/engine/*.cpp`) plus pytest (`tests/*.py`, `tests/instruments/visualize/`); run
+both with `make test-all PYTHON=~/venv/bin/python`.

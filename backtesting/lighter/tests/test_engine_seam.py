@@ -115,3 +115,35 @@ def test_punch_through_all_levels_raises(tmp_path):
     feed = _feed([(0, 100.0, 10.0, 101.0, 10.0)], [(100, 1, 100.0, 100.0)], depth=1)
     with pytest.raises(RuntimeError, match="punched through"):
         _fills(tmp_path, [(+5.0, 100.0, 0.0, False)], feed, 0)
+
+
+# ── ob.bid_volume(n) / ask_volume(n): C++-side sum of the top-n resting amounts,
+#    clamped to depth, n <= 0 → 0. The allocation-free replacement for summing
+#    ob.bids[i][1] in Python (which rebuilds the whole depth list per access). ──
+def test_bid_ask_volume_sum_top_n_and_clamp(tmp_path):
+    depth = 4
+    one = lambda vals: np.array([vals], np.float32)          # one snapshot, `depth` levels
+    arrays = dict(
+        lob_ts=np.array([0], np.int64),
+        bid_px=one([100., 99., 98., 97.]), bid_sz=one([1., 2., 3., 4.]),
+        ask_px=one([101., 102., 103., 104.]), ask_sz=one([10., 20., 30., 40.]),
+        trade_ts=np.array([0], np.int64), trade_is_sell=np.array([0], np.uint8),
+        trade_price=np.array([100.0]), trade_size=np.array([0.0]),
+    )
+    seen = {}
+
+    class _Capture(Strategy):
+        def on_lob(self, ob, inventory):
+            seen["b1"], seen["b3"] = ob.bid_volume(1), ob.bid_volume(3)
+            seen["b_clamp"], seen["b0"] = ob.bid_volume(100), ob.bid_volume(0)
+            seen["a2"], seen["a_default"] = ob.ask_volume(2), ob.ask_volume()
+
+    Backtester(latency_us=0, log_interval_sec=10.0).run(
+        _Capture(), feed=_ArrayFeed(arrays), output_path=str(tmp_path / "vol"))
+
+    assert seen["b1"] == 1.0                 # top level only
+    assert seen["b3"] == 6.0                 # 1 + 2 + 3
+    assert seen["b_clamp"] == 10.0           # n > depth → clamped to all four: 1+2+3+4
+    assert seen["b0"] == 0.0                 # n <= 0 sums nothing
+    assert seen["a2"] == 30.0                # 10 + 20
+    assert seen["a_default"] == 10.0         # default n=1 → top level
