@@ -23,14 +23,17 @@
 // Multiple batches can be in flight at once (a FIFO queue); the live set keeps
 // resting and matching in the meantime.
 //
-// Order lifecycle (MVP: create-only). Landed orders are APPENDED to the live set
-// (additive — no replace-all). An order leaves the book only by being filled or
-// by its GTT lifetime expiring (expire_at, resolved from ttl_us at landing time).
+// Order lifecycle (create + cancel). Landed orders are APPENDED to the live set
+// (additive — no replace-all). An order leaves the book by being filled, by its GTT
+// lifetime expiring (expire_at, resolved from ttl_us at landing time), or by a cancel
+// message matching its id on landing (see land_and_reap). Cancels are latency-delayed
+// like orders and share the same in-flight FIFO.
 
-// One in-flight order message: the orders to create and when they land.
+// One in-flight message: the orders to create, the ids to cancel, and when they land.
 struct InFlight {
-    int64_t            active_at;   // exchange time the batch reaches the book
-    std::vector<Order> quotes;      // orders to append to the live set on arrival
+    int64_t               active_at;   // exchange time the batch reaches the book
+    std::vector<Order>    quotes;      // orders to append to the live set on arrival
+    std::vector<uint64_t> cancels;     // resting-order ids to remove on arrival
 };
 
 class Backtester {
@@ -119,8 +122,22 @@ private:
     // live set — additive model), then reap any resting order whose GTT lifetime elapsed.
     void land_and_reap(int64_t current_timestamp_us) {
         while (!in_flight_.empty() && in_flight_.front().active_at <= current_timestamp_us) {
-            for (auto& order : in_flight_.front().quotes)
+            InFlight& msg = in_flight_.front();
+            for (auto& order : msg.quotes)
                 live_.push_back(std::move(order));
+            // Apply this message's cancels AFTER landing its own orders. A cancel can only
+            // be sent after the create it targets (it needs the id) and shares the same
+            // latency, so the target has already landed by now — cancels only ever hit the
+            // live set, never the in-flight queue. Unmatched ids (filled/expired) are no-ops.
+            if (!msg.cancels.empty()) {
+                live_.erase(
+                    std::remove_if(live_.begin(), live_.end(),
+                        [&msg](const Order& o) {
+                            return std::find(msg.cancels.begin(), msg.cancels.end(), o.id)
+                                   != msg.cancels.end();
+                        }),
+                    live_.end());
+            }
             in_flight_.pop_front();
         }
         live_.erase(
@@ -138,12 +155,13 @@ private:
         const int64_t active_at = current_timestamp_us + latency_us_;
         
         InFlight& back = in_flight_.push_back();
-        
+
         back.active_at = active_at;
         back.quotes.clear();
         back.quotes.reserve(5);
+        back.cancels.clear();   // ring buffer reuses slots — drop the previous tenant's cancels
 
-        strategy.on_lob(order_book, inventory_, back.quotes);
+        strategy.on_lob(order_book, inventory_, back.quotes, back.cancels);
 
         
         for (auto& order : back.quotes) {

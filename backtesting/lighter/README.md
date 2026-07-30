@@ -58,9 +58,10 @@ r.plot().show()
 
 Called on every LOB snapshot. Issue orders **imperatively** through `self.gateway`;
 `on_lob` returns nothing. Orders are **additive** — each `create_order` appends a new
-order to the book. An order leaves the book only when it is filled or when its GTT
-lifetime (`ttl_s`) elapses. There is no replace-all, so a strategy that quotes must
-throttle itself (quote on a schedule, not every tick) or its orders accumulate.
+order to the book. An order leaves the book when it is filled, when its GTT lifetime
+(`ttl_s`) elapses, or when you `cancel_order` it by id. There is no replace-all, so a
+strategy that quotes must throttle itself (quote on a schedule, not every tick), cancel
+its stale quotes, or let a short TTL reap them — otherwise its orders accumulate.
 
 ```python
 # a 3-level ladder, each order living 2 s
@@ -70,9 +71,10 @@ def on_lob(self, ob, inventory):
         self.gateway.create_order(-q, ob.mid + i*d, ttl_s=2.0)
 ```
 
-### `gateway.create_order(size, price, ttl_s=0.0, reduce_only=False)`
+### `gateway.create_order(size, price, ttl_s=0.0, reduce_only=False) → int`
 
-The only order verb in the MVP (`cancel_order` / `modify_order` come later).
+Post one order; returns its **id** (a positive int) for a later `cancel_order`. A
+zero-size order is a no-op and returns `0`. (`modify_order` comes later.)
 
 | Arg | Meaning |
 |---|---|
@@ -80,6 +82,14 @@ The only order verb in the MVP (`cancel_order` / `modify_order` come later).
 | `price` | limit price |
 | `ttl_s` | GTT lifetime in seconds (a number, default `0.0`); `<= 0` rests until filled (GTC) |
 | `reduce_only` | order fills only when it shrinks `|inventory|` |
+
+### `gateway.cancel_order(oid) → None`
+
+Cancel a resting order by the id `create_order` returned. **Latency-delayed** like any
+message: the removal takes effect at `T + latency_us`, so an order can still fill in the
+window between resting and the cancel landing — you cannot cancel faster than a round
+trip. A **no-op** if the order has already filled or expired, or if the id was never live
+(cancelling `0` does nothing).
 
 `self.gateway` is an `OrderGateway`. Subclass it in your notebook to add order-management
 policy (tracking, throttling, ladders) on top of the verbs, then assign it in the
@@ -246,7 +256,7 @@ are charged online (`Backtester(fee_bps=…)`; net PnL). Be aware of the current
   `inventory` as it stood when the trade arrived, so several reduce-only fills within
   one trade can jointly over-reduce (flip the sign). A corollary of the overfill caveat.
 - **Not modelled yet:** latency jitter, nonce-based queue position, tick-size rounding,
-  cancel/modify (create-only MVP). Fees are a flat per-fill `fee_bps`, not a tiered or
+  modify (create + cancel only). Fees are a flat per-fill `fee_bps`, not a tiered or
   maker/taker-split schedule.
 
 Engine behaviour is checked by the test suite under `tests/` — C++ GoogleTest

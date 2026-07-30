@@ -247,3 +247,139 @@ TEST(Backtester, ZeroLogIntervalSnapshotsEveryEvent) {
     RunData d = f.run(s, /*latency=*/0, /*log_interval_us=*/0, /*quote_stride=*/1);
     EXPECT_GE(d.pnl_t.size(), 5u);                // ts − last_log ≥ 0 always → snapshot per event
 }
+
+// ── cancel_order: latency-delayed removal by id ──────────────────────────────
+// Scripted strategy: emit `batch` on tick 0, emit `to_cancel` on tick `cancel_on`
+// (0 = same tick as the create). Ticks count LOB events only.
+struct CreateThenCancel : StrategyBase {
+    std::vector<Order>    batch;
+    std::vector<uint64_t> to_cancel;
+    int cancel_on;
+    int k = 0;
+    CreateThenCancel(std::vector<Order> b, std::vector<uint64_t> c, int cancel_on_)
+        : batch(std::move(b)), to_cancel(std::move(c)), cancel_on(cancel_on_) {}
+    void on_lob(const OrderBook&, double, std::vector<Order>& orders,
+                std::vector<uint64_t>& cancels) override {
+        if (k == 0)         orders.insert(orders.end(), batch.begin(), batch.end());
+        if (k == cancel_on) cancels.insert(cancels.end(), to_cancel.begin(), to_cancel.end());
+        ++k;
+    }
+};
+
+// A book with queue 0 at the touch (any sell fills a resting bid), snapshots every 500 µs.
+static Feed cancel_feed() {
+    Feed f;
+    for (int64_t t = 0; t <= 3000; t += 500) f.lob(t, 100.0, 0.0, 101.0, 0.0);
+    return f;
+}
+
+// In flight, trade inside the window: order lands at T_create+lat, cancel only at
+// T_cancel+lat > that, so a trade in between still fills — you cannot cancel faster
+// than the round trip.
+TEST(Backtester, CancelInFlightStillFillsInsideTheWindow) {
+    Feed f = cancel_feed();
+    f.trade(1200, /*sell=*/true, 100.0, 100.0);        // between land(1000) and cancel-land(1500)
+    CreateThenCancel s({bid(100.0, 5.0, 0, false, /*id=*/1)}, {1}, /*cancel_on=*/1);
+    RunData d = f.run(s, /*latency=*/1000);
+    EXPECT_EQ(n_side(d, 0), 1);
+}
+
+// Same setup, trade after the cancel has landed → the order is gone.
+TEST(Backtester, CancelInFlightRemovesOnceItLands) {
+    Feed f = cancel_feed();
+    f.trade(2000, true, 100.0, 100.0);                 // after cancel-land(1500)
+    CreateThenCancel s({bid(100.0, 5.0, 0, false, 1)}, {1}, 1);
+    RunData d = f.run(s, 1000);
+    EXPECT_EQ(n_side(d, 0), 0);
+}
+
+// Create and cancel on the same tick ride one message: landed, then removed → nothing rests.
+TEST(Backtester, CreateAndCancelSameTickRestsNothing) {
+    Feed f = cancel_feed();
+    f.trade(2000, true, 100.0, 100.0);
+    CreateThenCancel s({bid(100.0, 5.0, 0, false, 1)}, {1}, /*cancel_on=*/0);
+    RunData d = f.run(s, 0);
+    EXPECT_EQ(n_side(d, 0), 0);
+}
+
+// Cancelling an id that was never live matches nothing → the real order still rests.
+TEST(Backtester, CancelUnknownIdIsNoOp) {
+    Feed f = cancel_feed();
+    f.trade(2000, true, 100.0, 100.0);
+    CreateThenCancel s({bid(100.0, 5.0, 0, false, 1)}, {999}, 1);
+    RunData d = f.run(s, 0);
+    EXPECT_EQ(n_side(d, 0), 1);
+}
+
+// Two resting bids at the same price (ids 1, 2); a sell of 5 fills each independently.
+// Cancelling id 1 removes exactly that order → only id 2 survives to fill.
+TEST(Backtester, CancelRemovesOnlyTheMatchingId) {
+    Feed f = cancel_feed();
+    f.trade(2000, true, 100.0, 5.0);
+    std::vector<Order> two = {bid(100.0, 5.0, 0, false, 1), bid(100.0, 5.0, 0, false, 2)};
+    CreateThenCancel ctrl(two, {}, 1);
+    EXPECT_EQ(n_side(f.run(ctrl, 0), 0), 2);           // baseline: both fill (independent matching)
+    CreateThenCancel s(two, {1}, 1);
+    EXPECT_EQ(n_side(f.run(s, 0), 0), 1);              // id 1 cancelled → only id 2 fills
+}
+
+// The same id in the cancel list twice: removed once, the second is a no-op, no crash.
+TEST(Backtester, DoubleCancelSameIdIsHarmless) {
+    Feed f = cancel_feed();
+    f.trade(2000, true, 100.0, 5.0);
+    CreateThenCancel s({bid(100.0, 5.0, 0, false, 1), bid(100.0, 5.0, 0, false, 2)}, {1, 1}, 1);
+    RunData d = f.run(s, 0);
+    EXPECT_EQ(n_side(d, 0), 1);                        // only id 2 remains
+}
+
+// Cancelling an order that already expired (GTT reaped) matches nothing — no-op, no crash.
+TEST(Backtester, CancelExpiredOrderIsNoOp) {
+    Feed f = cancel_feed();
+    f.trade(3000, true, 100.0, 100.0);
+    // ttl 500 µs, latency 0 → order expires ~500; cancel emitted much later (tick 4, t=2000)
+    CreateThenCancel s({bid(100.0, 5.0, /*ttl_us=*/500, false, 1)}, {1}, /*cancel_on=*/4);
+    RunData d = f.run(s, 0);
+    EXPECT_EQ(n_side(d, 0), 0);                        // expired before the trade; cancel is inert
+}
+
+// Cancelling an order that already filled fully (a size-0 husk still in live_) removes
+// the husk harmlessly — the fill already happened, so nothing changes.
+TEST(Backtester, CancelAlreadyFilledOrderIsNoOp) {
+    Feed f = cancel_feed();
+    f.trade(1200, true, 100.0, 100.0);                 // fills the bid fully at 1200
+    CreateThenCancel s({bid(100.0, 5.0, 0, false, 1)}, {1}, /*cancel_on=*/4);  // cancel long after
+    RunData d = f.run(s, 1000);
+    EXPECT_EQ(n_side(d, 0), 1);                         // the fill stands; the late cancel is inert
+}
+
+// A partially filled order keeps its remainder resting under the same id; cancelling it
+// removes the remainder, so a later sell that would have taken it finds nothing.
+TEST(Backtester, CancelRemovesThePartiallyFilledRemainder) {
+    Feed f;
+    for (int64_t t = 0; t <= 3000; t += 500) f.lob(t, 100.0, 0.0, 101.0, 0.0);
+    f.trade(700,  true, 100.0, 4.0);                   // partial: fills 4 of the size-10 bid
+    f.trade(2500, true, 100.0, 100.0);                 // would take the remaining 6 — if still there
+    CreateThenCancel s({bid(100.0, 10.0, 0, false, 1)}, {1}, /*cancel_on=*/3);  // cancel at t=1500
+    RunData d = f.run(s, 0);
+    EXPECT_EQ(n_side(d, 0), 1);                         // only the partial fill; remainder cancelled
+    CreateThenCancel ctrl({bid(100.0, 10.0, 0, false, 1)}, {}, 3);
+    EXPECT_EQ(n_side(f.run(ctrl, 0), 0), 2);            // control: remainder fills the second sell
+}
+
+// A cancel for an id that does not exist yet lands before that id is ever created, matches
+// nothing, and is inert — cancels only touch what is resting when they land.
+TEST(Backtester, PrematureCancelBeforeCreateIsInert) {
+    Feed f = cancel_feed();
+    f.trade(2000, true, 100.0, 100.0);
+    struct PreCancel : StrategyBase {                  // tick 0: cancel id 1; tick 1: create id 1
+        int k = 0;
+        void on_lob(const OrderBook&, double, std::vector<Order>& orders,
+                    std::vector<uint64_t>& cancels) override {
+            if (k == 0) cancels.push_back(1);
+            if (k == 1) orders.push_back(bid(100.0, 5.0, 0, false, 1));
+            ++k;
+        }
+    } s;
+    RunData d = f.run(s, 0);
+    EXPECT_EQ(n_side(d, 0), 1);                         // premature cancel missed; order 1 rests & fills
+}

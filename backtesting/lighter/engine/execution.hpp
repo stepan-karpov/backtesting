@@ -6,12 +6,13 @@
 // ─── Order / Fill ─────────────────────────────────────────────────────────────
 
 struct Order {
-    bool    is_bid;
-    double  price;
-    double  size;
-    int64_t ttl_us;      // requested GTT lifetime (0 = GTC); resolved to expire_at at landing
-    int64_t expire_at;   // absolute exchange time the order dies (0 = never)
-    bool    reduce_only; // only fills when it shrinks |inventory|
+    bool     is_bid;
+    double   price;
+    double   size;
+    int64_t  ttl_us;      // requested GTT lifetime (0 = GTC); resolved to expire_at at landing
+    int64_t  expire_at;   // absolute exchange time the order dies (0 = never)
+    bool     reduce_only; // only fills when it shrinks |inventory|
+    uint64_t id;          // strategy-assigned id (from the gateway); 0 = untracked. cancel matches on it
 };
 
 struct Fill {

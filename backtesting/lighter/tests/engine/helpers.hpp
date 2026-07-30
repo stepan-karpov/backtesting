@@ -17,11 +17,11 @@
 namespace t {
 
 // ── Order builders (Order = {is_bid, price, size, ttl_us, expire_at, reduce_only}) ──
-inline Order bid(double price, double size, int64_t ttl_us = 0, bool ro = false) {
-    return Order{true, price, size, ttl_us, 0, ro};
+inline Order bid(double price, double size, int64_t ttl_us = 0, bool ro = false, uint64_t id = 0) {
+    return Order{true, price, size, ttl_us, 0, ro, id};
 }
-inline Order ask(double price, double size, int64_t ttl_us = 0, bool ro = false) {
-    return Order{false, price, size, ttl_us, 0, ro};
+inline Order ask(double price, double size, int64_t ttl_us = 0, bool ro = false, uint64_t id = 0) {
+    return Order{false, price, size, ttl_us, 0, ro, id};
 }
 
 // ── Book builder. Given levels, then one out-of-reach sentinel per side (deeper
@@ -47,7 +47,8 @@ struct OnceStrategy : StrategyBase {         // emit `batch` on the first event 
     std::vector<Order> batch;
     bool fired = false;
     explicit OnceStrategy(std::vector<Order> b) : batch(std::move(b)) {}
-    void on_lob(const OrderBook&, double, std::vector<Order>& orders) override {
+    void on_lob(const OrderBook&, double, std::vector<Order>& orders,
+                std::vector<uint64_t>&) override {
         if (fired) return;
         fired = true;
         orders.insert(orders.end(), batch.begin(), batch.end());
@@ -57,7 +58,8 @@ struct OnceStrategy : StrategyBase {         // emit `batch` on the first event 
 struct EveryTick : StrategyBase {            // emit `batch` on every LOB event
     std::vector<Order> batch;
     explicit EveryTick(std::vector<Order> b) : batch(std::move(b)) {}
-    void on_lob(const OrderBook&, double, std::vector<Order>& orders) override {
+    void on_lob(const OrderBook&, double, std::vector<Order>& orders,
+                std::vector<uint64_t>&) override {
         orders.insert(orders.end(), batch.begin(), batch.end());
     }
 };

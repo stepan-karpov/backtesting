@@ -147,3 +147,44 @@ def test_bid_ask_volume_sum_top_n_and_clamp(tmp_path):
     assert seen["b0"] == 0.0                 # n <= 0 sums nothing
     assert seen["a2"] == 30.0                # 10 + 20
     assert seen["a_default"] == 10.0         # default n=1 → top level
+
+
+# ── cancel_order end-to-end through the seam: create_order returns an id, cancel_order
+#    rides the same latency FIFO and removes the resting order by id on landing ──
+_BOOK = [(t, 100.0, 0.0, 101.0, 0.0) for t in range(0, 3001, 500)]   # bid@100, queue 0
+
+
+class _CreateThenCancel(Strategy):
+    """Create a GTC bid on the first tick; cancel it on tick `cancel_on` (0 = same tick)."""
+    def __init__(self, cancel_on):
+        super().__init__()
+        self._cancel_on, self._k, self._oid = cancel_on, 0, None
+
+    def on_lob(self, ob, inventory):
+        if self._k == 0:
+            self._oid = self.gateway.create_order(+5.0, 100.0)   # returns an id
+        if self._k == self._cancel_on:
+            self.gateway.cancel_order(self._oid)
+        self._k += 1
+
+
+def _cancel_fills(tmp_path, cancel_on, trade_ts, latency_us):
+    prefix = str(tmp_path / "cancel")
+    Backtester(latency_us=latency_us, log_interval_sec=10.0).run(
+        _CreateThenCancel(cancel_on), feed=_feed(_BOOK, [(trade_ts, 1, 100.0, 100.0)]),
+        output_path=prefix)
+    return _n(BacktestResult(prefix).fills)
+
+
+def test_cancel_removes_resting_order(tmp_path):
+    # latency 1000: order lands 1000, cancel lands 1500; a sell at 2000 finds nothing
+    assert _cancel_fills(tmp_path, cancel_on=1, trade_ts=2000, latency_us=1000) == 0
+
+
+def test_cancel_in_flight_still_fills_in_the_window(tmp_path):
+    # a sell at 1200 lands after the order (1000) but before the cancel (1500) → fills
+    assert _cancel_fills(tmp_path, cancel_on=1, trade_ts=1200, latency_us=1000) == 1
+
+
+def test_create_and_cancel_same_tick_rests_nothing(tmp_path):
+    assert _cancel_fills(tmp_path, cancel_on=0, trade_ts=2000, latency_us=0) == 0

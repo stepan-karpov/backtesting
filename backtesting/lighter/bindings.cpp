@@ -24,20 +24,25 @@ public:
         , _on_fill (strategy.attr("on_fill"))
     {}
 
-    void on_lob(const OrderBook& ob, double inventory, std::vector<Order>& orders) override {
-        py::object pending = _lob_step(
-            py::cast(&ob, py::return_value_policy::reference), inventory);
+    void on_lob(const OrderBook& ob, double inventory,
+                std::vector<Order>& orders, std::vector<uint64_t>& cancels) override {
+        // _lob_step drains the gateway → (order tuples, cancel ids) for this event.
+        const py::tuple drained = _lob_step(
+            py::cast(&ob, py::return_value_policy::reference), inventory).cast<py::tuple>();
 
-        for (auto item : pending) {
-            const py::tuple o = item.cast<py::tuple>();      // (size, price, ttl_s, reduce_only)
-            const double  size = o[0].cast<double>();        // signed: sign = side
-            const double  px   = o[1].cast<double>();
-            const double  ttl  = o[2].cast<double>();        // seconds; <= 0 = GTC
-            const bool    ro   = o[3].cast<bool>();
+        for (auto item : drained[0]) {
+            const py::tuple o = item.cast<py::tuple>();       // (oid, size, price, ttl_s, reduce_only)
+            const uint64_t oid  = o[0].cast<uint64_t>();
+            const double   size = o[1].cast<double>();        // signed: sign = side
+            const double   px   = o[2].cast<double>();
+            const double   ttl  = o[3].cast<double>();        // seconds; <= 0 = GTC
+            const bool     ro   = o[4].cast<bool>();
             const int64_t ttl_us = ttl > 0.0 ? static_cast<int64_t>(ttl * 1e6) : 0;
             orders.push_back({size > 0.0, px, size < 0.0 ? -size : size,
-                              ttl_us, /*expire_at=*/0, ro});
+                              ttl_us, /*expire_at=*/0, ro, oid});
         }
+        for (auto id : drained[1])
+            cancels.push_back(id.cast<uint64_t>());
     }
 
     void on_fill(int64_t t_us, const Fill& f) override {

@@ -16,9 +16,9 @@ class Strategy:
         """Called after each fill. side is 'bid', 'ask', or 'markout'."""
         # raise NotImplementedError
 
-    def _lob_step(self, order_book, inventory: float) -> list[tuple]:
-        """Engine seam — one call per LOB tick (see PyStrategy in bindings.cpp):
-        run the user's imperative on_lob, then drain the gateway's queued orders.
-        Keeps on_lob return-free while the hot path pays a single C++↔Python hop."""
+    def _lob_step(self, order_book, inventory: float) -> tuple[list[tuple], list[int]]:
+        """Engine seam — one call per LOB tick (see PyStrategy in bindings.cpp): run the
+        user's imperative on_lob, then drain the gateway into (orders, cancels) for the
+        engine. Keeps on_lob return-free while the hot path pays a single C++↔Python hop."""
         self.on_lob(order_book, inventory)
         return self.gateway._drain()
