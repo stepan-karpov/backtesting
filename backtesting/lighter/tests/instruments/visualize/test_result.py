@@ -13,7 +13,9 @@ from backtesting.lighter.instruments.visualize import BacktestResult
 def _quota(pnl):
     """A trivial flat quota stream spanning the run — most tests don't exercise quota."""
     t = np.asarray(pnl["pnl_t"], np.int64)
-    return dict(quota_t=np.array([t[0], t[-1]], np.int64), quota_v=np.array([1000, 1000], np.int64))
+    return dict(quota_t=np.array([t[0], t[-1]], np.int64),
+                quota_v=np.array([1000, 1000], np.int64),
+                quota_kind=np.array([0, 0], np.int8))          # two seeds
 
 
 def _result(tmp_path, *, pnl, quotes, fills, quota=None):
@@ -192,6 +194,7 @@ def _scenario(tmp_path, *, secs, inv, mid, pnl, fills, bid=None, ask=None):
         fill_mid=np.array([f[5] for f in fills], float),
         fill_fee=np.zeros(len(fills)),
         quota_t=np.array([t[0], t[-1]], np.int64), quota_v=np.array([1000, 1000], np.int64),
+        quota_kind=np.array([0, 0], np.int8),
     ), str(tmp_path / "sc"))
     return BacktestResult(str(tmp_path / "sc")).summary()
 
@@ -341,9 +344,37 @@ def test_quota_metrics_from_step_series(tmp_path):
                    fill_price=np.array([100.0]), fill_size=np.array([0.0]),
                    fill_inv=np.array([0.0]), fill_mid=np.array([100.0]), fill_fee=np.array([0.0])),
         quota=dict(quota_t=np.array([0, 10, 30]) * 1_000_000,
-                   quota_v=np.array([1000, 990, 1050], np.int64)),
+                   quota_v=np.array([1000, 990, 1050], np.int64),
+                   quota_kind=np.array([0, 1, 3], np.int8)),
     ).summary()
     assert m["quota_min"] == 990.0
     assert m["quota_max"] == 1050.0
+    assert m["quota_end"] == 1050.0                         # terminal balance, not the min
     # 1000 for 10 s + 990 for 20 s, over 30 s (the 1050 endpoint carries zero width)
     assert m["quota_time_avg"] == pytest.approx((1000 * 10 + 990 * 20) / 30)
+
+
+# ── quota count metrics from quota_kind: placements, free placements, fill-per-create ──
+def test_quota_count_metrics_from_kind(tmp_path):
+    # quota_kind: seed, paid placement (−1), free placement (0), fill (+25) → end 1024.
+    # one real bid fill in the fills stream → n_fills = 1.
+    span = np.array([0, 30]) * 1_000_000
+    m = _result(
+        tmp_path,
+        pnl=dict(pnl_t=span, pnl_v=np.array([0.0, 0.0]), inv_v=np.array([0.0, 0.0])),
+        quotes=dict(qt_t=span, qt_mid=np.array([100.0, 100.0]),
+                    qt_bid=np.array([99.9, 99.9]), qt_ask=np.array([100.1, 100.1])),
+        fills=dict(fill_t=np.array([5, 30]) * 1_000_000, fill_side=np.array([0, 2], np.int32),
+                   fill_price=np.array([100.0, 100.0]), fill_size=np.array([0.5, 0.0]),
+                   fill_inv=np.array([0.5, 0.0]), fill_mid=np.array([100.0, 100.0]),
+                   fill_fee=np.array([0.0, 0.0])),
+        quota=dict(quota_t=np.array([0, 3, 5, 7]) * 1_000_000,
+                   quota_v=np.array([1000, 999, 999, 1024], np.int64),
+                   quota_kind=np.array([0, 1, 2, 3], np.int8)),   # seed, paid, free, fill
+    ).summary()
+    assert m["n_creates"] == 2                              # kinds 1 and 2
+    assert m["n_free_tx_used"] == 1                         # kind 2
+    assert m["n_fills"] == 1                                # the bid fill (markout excluded)
+    assert m["p_fill_per_create"] == pytest.approx(0.5)     # 1 / 2
+    assert m["quota_end"] == 1024.0
+    assert m["quota_drift_per_day"] == pytest.approx((1024 - 1000) / m["n_days"])

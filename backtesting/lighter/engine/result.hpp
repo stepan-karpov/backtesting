@@ -16,12 +16,22 @@ struct RunData {
     std::vector<double>  fill_price, fill_size, fill_inv, fill_mid, fill_fee;
 
     // Lighter volume-quota balance, sampled at every event that changes it (an order
-    // placement spends it, a fill earns it — see Backtester). Integer counts.
+    // placement spends it, a fill earns it — see Backtester). Integer counts. `quota_kind`
+    // tags each sample so downstream can count placements / free placements / fills.
     std::vector<int64_t> quota_t, quota_v;
+    std::vector<int8_t>  quota_kind;
+
+    enum QuotaKind : int8_t {                // values stored in quota_kind
+        QUOTA_SEED         = 0,              // run-boundary marker (start / final)
+        QUOTA_CREATE_PAID  = 1,              // placement that spent 1
+        QUOTA_CREATE_FREE  = 2,              // placement covered by the free slot (spent 0)
+        QUOTA_FILL         = 3,              // maker fill that earned floor(notional/$2)
+    };
 
     void reserve(std::size_t n_quotes, std::size_t n_pnl, std::size_t n_fills) {
         quota_t.reserve(n_fills + n_pnl);
         quota_v.reserve(n_fills + n_pnl);
+        quota_kind.reserve(n_fills + n_pnl);
         qt_t.reserve(n_quotes);
         qt_bid.reserve(n_quotes);
         qt_ask.reserve(n_quotes);
@@ -65,8 +75,9 @@ struct RunData {
         fill_fee.push_back(fee);
     }
 
-    void add_quota_sample(int64_t t, int64_t quota) {
+    void add_quota_sample(int64_t t, int64_t quota, int8_t kind) {
         quota_t.push_back(t);
         quota_v.push_back(quota);
+        quota_kind.push_back(kind);
     }
 };

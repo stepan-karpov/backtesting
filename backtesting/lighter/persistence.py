@@ -21,7 +21,7 @@ _QUOTE_COLS = {"t_us": "qt_t", "bid": "qt_bid", "ask": "qt_ask", "mid": "qt_mid"
 _FILL_COLS  = {"t_us": "fill_t", "side": "fill_side", "price": "fill_price",
                "size": "fill_size", "inventory": "fill_inv", "mid_at_fill": "fill_mid",
                "fee": "fill_fee"}
-_QUOTA_COLS = {"t_us": "quota_t", "quota": "quota_v"}
+_QUOTA_COLS = {"t_us": "quota_t", "quota": "quota_v", "kind": "quota_kind"}
 
 
 def save_run(arrays: dict, prefix: str) -> str:

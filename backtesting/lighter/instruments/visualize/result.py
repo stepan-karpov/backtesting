@@ -74,9 +74,11 @@ class BacktestResult:
 
         # Lighter volume-quota balance, sampled by the engine at every event that spent or
         # earned it (a placement −1, a fill +floor(notional/$2), one free placement / 15 s).
-        # A step series: the balance holds between samples.
+        # A step series: the balance holds between samples. quota_kind tags each sample:
+        # 0 seed, 1 placement-paid, 2 placement-free, 3 fill.
         self.quota = pd.Series(
             np.asarray(a["quota_v"], np.int64), index=to_dt(a["quota_t"]), name="quota")
+        self.quota_kind = np.asarray(a["quota_kind"], np.int8)
 
     # ── grid & fill frames ──────────────────────────────────────────────────────
 
@@ -455,12 +457,21 @@ class BacktestResult:
         if len(qv):
             v["quota_min"] = float(qv.min())
             v["quota_max"] = float(qv.max())
+            v["quota_end"] = float(qv[-1])                        # terminal balance (≠ min)
+            v["quota_drift_per_day"] = float((qv[-1] - qv[0]) / n_days)   # net accrual/day
             qt = self.quota.index.asi8.astype(np.float64)
             span = qt[-1] - qt[0]
             v["quota_time_avg"] = (float(np.sum(qv[:-1] * np.diff(qt)) / span)
                                    if len(qv) > 1 and span > 0 else float(qv[0]))
+            kind = self.quota_kind                               # 1 paid, 2 free, 3 fill
+            n_creates = int(np.count_nonzero((kind == 1) | (kind == 2)))
+            v["n_creates"] = n_creates
+            v["n_free_tx_used"] = int(np.count_nonzero(kind == 2))
+            v["p_fill_per_create"] = float(v["n_fills"] / n_creates) if n_creates else np.nan
         else:
-            v["quota_min"] = v["quota_max"] = v["quota_time_avg"] = np.nan
+            for _k in ("quota_min", "quota_max", "quota_end", "quota_drift_per_day",
+                       "quota_time_avg", "n_creates", "n_free_tx_used", "p_fill_per_create"):
+                v[_k] = np.nan
 
         if not self._has_mid:
             notes["capture_share_of_variance"] = "fill-aware unavailable (no mid_at_fill); naive grid d_mtm"
@@ -544,6 +555,11 @@ class BacktestResult:
             ("Ops", "two_sided_uptime (%)",           fmt("a2", "two_sided_uptime_pct")),
             ("Ops", "quote_updates/min p50",          fmt("a2", "quote_updates_min_p50")),
             ("Ops", "quote_updates/min p95",          fmt("a2", "quote_updates_min_p95")),
+            ("Quota", "p_fill_per_create",            fmt("a4", "p_fill_per_create")),
+            ("Quota", "n_creates",                    fmt("count", "n_creates")),
+            ("Quota", "n_free_tx_used",               fmt("count", "n_free_tx_used")),
+            ("Quota", "quota_end",                    fmt("count", "quota_end")),
+            ("Quota", "quota_drift_per_day",          fmt("a2", "quota_drift_per_day")),
             ("Quota", "quota_min",                    fmt("count", "quota_min")),
             ("Quota", "quota_max",                    fmt("count", "quota_max")),
             ("Quota", "quota_time_avg",               fmt("a2", "quota_time_avg")),

@@ -155,6 +155,7 @@ static py::dict run_arrays(
     out["fill_fee"]   = to_np(data.fill_fee);
     out["quota_t"]    = to_np(data.quota_t);
     out["quota_v"]    = to_np(data.quota_v);
+    out["quota_kind"] = to_np(data.quota_kind);
     return out;
 }
 

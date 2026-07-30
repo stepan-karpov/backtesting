@@ -92,7 +92,7 @@ public:
 
         last_log_us_ = lob_source.timestamp();
         int64_t current_timestamp_us = lob_source.timestamp();
-        data.add_quota_sample(current_timestamp_us, quota_);   // seed the quota series at the start
+        data.add_quota_sample(current_timestamp_us, quota_, RunData::QUOTA_SEED);   // seed at the start
 
         std::vector<Fill> trade_fills;
         trade_fills.reserve(40);
@@ -129,7 +129,7 @@ public:
         cash_ += inventory_ * fin_mid;
         data.add_fill(current_timestamp_us, Fill{2, fin_mid, -inventory_}, 0.0, fin_mid, 0.0);
         data.add_pnl_snapshot(current_timestamp_us, cash_, 0.0);
-        data.add_quota_sample(current_timestamp_us, quota_);   // final sample so the series spans the run
+        data.add_quota_sample(current_timestamp_us, quota_, RunData::QUOTA_SEED);   // final sample spans the run
 
         return data;
     }
@@ -184,12 +184,16 @@ private:
             order.expire_at = (order.ttl_us > 0) ? active_at + order.ttl_us : 0;
             // Quota: each created order is one SendTx, spent at send time (this tick). One
             // placement per free interval is free (rolling since the last free one), else −1.
+            int8_t kind;
             if (last_free_us_ == quota_rules::kNever
-                    || current_timestamp_us - last_free_us_ >= quota_rules::kFreeIntervalUs)
+                    || current_timestamp_us - last_free_us_ >= quota_rules::kFreeIntervalUs) {
                 last_free_us_ = current_timestamp_us;
-            else
+                kind = RunData::QUOTA_CREATE_FREE;
+            } else {
                 quota_ -= 1;
-            data.add_quota_sample(current_timestamp_us, quota_);
+                kind = RunData::QUOTA_CREATE_PAID;
+            }
+            data.add_quota_sample(current_timestamp_us, quota_, kind);
         }
 
         if (lob_counter_ % quote_log_stride_ == 0) {
@@ -221,7 +225,7 @@ private:
             cash_ -= fee;                                      // fee is always a cost
             // Quota: a maker fill earns floor(notional / $2), credited per fill.
             quota_ += static_cast<int64_t>(std::floor(f.price * f.size / quota_rules::kUsdPerQuota));
-            data.add_quota_sample(current_timestamp_us, quota_);
+            data.add_quota_sample(current_timestamp_us, quota_, RunData::QUOTA_FILL);
             data.add_fill(current_timestamp_us, f, inventory_, order_book.mid(), fee);
             strategy.on_fill(current_timestamp_us, f);
         }

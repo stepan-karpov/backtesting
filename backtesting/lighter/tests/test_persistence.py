@@ -23,6 +23,7 @@ def _arrays() -> dict:
         "fill_fee": np.array([0.05, 0.0]),
         "quota_t": np.array([0, 500_000, 1_000_000], np.int64),
         "quota_v": np.array([1000, 999, 1024], np.int64),   # −1 placement, then +25 from a fill
+        "quota_kind": np.array([0, 1, 3], np.int8),         # seed, placement-paid, fill
     }
 
 
@@ -48,7 +49,7 @@ def test_csv_fallback_maps_string_side_to_code(tmp_path):
     pd.DataFrame({"t_us": [0], "bid": [100.0], "ask": [101.0], "mid": [100.5]}).to_csv(f"{prefix}_quotes.csv", index=False)
     pd.DataFrame({"t_us": [0], "side": ["ask"], "price": [101.0], "size": [-1.0],
                   "inventory": [-1.0], "mid_at_fill": [100.5], "fee": [0.01]}).to_csv(f"{prefix}_fills.csv", index=False)
-    pd.DataFrame({"t_us": [0], "quota": [1000]}).to_csv(f"{prefix}_quota.csv", index=False)
+    pd.DataFrame({"t_us": [0], "quota": [1000], "kind": [0]}).to_csv(f"{prefix}_quota.csv", index=False)
     back = load_run(prefix)                                 # parquet absent → CSV fallback
     assert back["fill_side"].tolist() == [1]                # "ask" string → code 1
     assert back["pnl_v"].tolist() == [1.0]
