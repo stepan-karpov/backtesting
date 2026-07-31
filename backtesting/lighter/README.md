@@ -34,7 +34,7 @@ class MyStrategy(Strategy):
         self.gateway.create_order(+size, ob.mid - d, ttl_s=2.0)
         self.gateway.create_order(-size, ob.mid + d, ttl_s=2.0)
 
-    def on_fill(self, t_us: int, side: str, price: float, size: float) -> None:
+    def on_fill(self, t_us: int, side: str, price: float, size: float, order_id: int) -> None:
         pass  # optional
 
 feed = LighterFeed(lob_paths, trades_paths)   # parquet + zst → normalised arrays
@@ -110,9 +110,12 @@ strategy's `__init__`.
 `depth` is set by the feed (`LighterFeed(..., depth=3)`); indexing `ob.bids`/`ob.asks`
 beyond it raises `IndexError`.
 
-### `on_fill(t_us, side, price, size)`
+### `on_fill(t_us, side, price, size, order_id)`
 
-Called after each fill. `side` is `"bid"`, `"ask"`, or `"markout"` (final position close).
+Called after each of your resting orders fills. `side` is `"bid"` or `"ask"`; `order_id`
+is the id `create_order` returned for that order (the same id `cancel_order` takes), so a
+strategy holding several orders can attribute the fill exactly. The final markout close is
+**not** routed here (it is a valuation mark, not one of your executions).
 
 ---
 

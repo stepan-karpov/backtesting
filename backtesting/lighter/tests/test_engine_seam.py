@@ -188,3 +188,21 @@ def test_cancel_in_flight_still_fills_in_the_window(tmp_path):
 
 def test_create_and_cancel_same_tick_rests_nothing(tmp_path):
     assert _cancel_fills(tmp_path, cancel_on=0, trade_ts=2000, latency_us=0) == 0
+
+
+# ── on_fill reports the id create_order returned (full round-trip identity through pybind) ──
+def test_on_fill_reports_the_created_order_id(tmp_path):
+    seen = {}
+
+    class _Recorder(Strategy):
+        def on_lob(self, ob, inventory):
+            if "oid" not in seen:
+                seen["oid"] = self.gateway.create_order(+5.0, 100.0)   # GTC bid, queue 0
+
+        def on_fill(self, t_us, side, price, size, order_id):
+            seen.setdefault("fills", []).append((side, order_id))
+
+    feed = _feed([(0, 100.0, 0.0, 101.0, 0.0)], [(100, 1, 100.0, 100.0)])   # a sell fills the bid
+    Backtester(latency_us=0, log_interval_sec=10.0).run(
+        _Recorder(), feed=feed, output_path=str(tmp_path / "of"))
+    assert seen["fills"] == [("bid", seen["oid"])]     # exactly one fill, tagged with our id

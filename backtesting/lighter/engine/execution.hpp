@@ -17,9 +17,10 @@ struct Order {
 
 struct Fill {
     // 0 = bid, 1 = ask, 2 = markout
-    int    side;
-    double price;
-    double size;
+    int      side;
+    double   price;
+    double   size;
+    uint64_t id = 0;   // id of the resting order that filled (0 = markout / untracked)
 };
 
 // ─── ExecutionModel (abstract) ────────────────────────────────────────────────
@@ -76,7 +77,7 @@ public:
                         if (cap <= 0.0) continue;         // nothing to reduce
                         if (fill > cap) fill = cap;
                     }
-                    fills_out.push_back({0, o.price, fill});
+                    fills_out.push_back({0, o.price, fill, o.id});
                     o.size -= fill;
                 }
             } else if (!is_sell && !o.is_bid && trade_price >= o.price) {
@@ -88,7 +89,7 @@ public:
                         if (cap <= 0.0) continue;         // nothing to reduce
                         if (fill > cap) fill = cap;
                     }
-                    fills_out.push_back({1, o.price, fill});
+                    fills_out.push_back({1, o.price, fill, o.id});
                     o.size -= fill;
                 }
             }

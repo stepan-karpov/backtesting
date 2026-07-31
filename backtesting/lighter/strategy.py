@@ -12,8 +12,10 @@ class Strategy:
         `self.gateway.create_order(size, price, ttl_s=...)`. No return value."""
         raise NotImplementedError
 
-    def on_fill(self, t_us: int, side: str, price: float, size: float) -> None:
-        """Called after each fill. side is 'bid', 'ask', or 'markout'."""
+    def on_fill(self, t_us: int, side: str, price: float, size: float, order_id: int) -> None:
+        """Called after each of our resting orders fills. `side` is 'bid' or 'ask';
+        `order_id` is the id create_order returned for that order (0 = untracked). The
+        final markout close is not routed here."""
         # raise NotImplementedError
 
     def _lob_step(self, order_book, inventory: float) -> tuple[list[tuple], list[int]]:

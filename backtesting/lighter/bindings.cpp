@@ -47,7 +47,7 @@ public:
 
     void on_fill(int64_t t_us, const Fill& f) override {
         static const char* SIDES[] = {"bid", "ask", "markout"};
-        _on_fill(t_us, SIDES[f.side], f.price, f.size);
+        _on_fill(t_us, SIDES[f.side], f.price, f.size, f.id);
     }
 };
 

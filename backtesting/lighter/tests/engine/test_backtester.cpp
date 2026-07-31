@@ -417,3 +417,25 @@ TEST(Backtester, QuotaFillEarnsFloorOfNotionalOverTwoDollars) {
     RunData d = f.run(s, 0);
     EXPECT_EQ(d.quota_v.back(), 1150);                // 1000 (free placement) + 150 (fill)
 }
+
+// on_fill reports the id of the resting order that filled (the id create_order returned).
+struct FillIdRecorder : StrategyBase {
+    uint64_t place_id;
+    bool fired = false;
+    std::vector<uint64_t> filled_ids;
+    explicit FillIdRecorder(uint64_t id) : place_id(id) {}
+    void on_lob(const OrderBook&, double, std::vector<Order>& orders,
+                std::vector<uint64_t>&) override {
+        if (!fired) { fired = true; orders.push_back(bid(100.0, 5.0, 0, false, place_id)); }
+    }
+    void on_fill(int64_t, const Fill& f) override { filled_ids.push_back(f.id); }
+};
+
+TEST(Backtester, OnFillCarriesTheFilledOrdersId) {
+    Feed f;
+    f.lob(0, 100.0, 0.0, 101.0, 0.0).trade(100, /*sell=*/true, 100.0, 100.0);
+    FillIdRecorder s(/*id=*/42);
+    f.run(s, 0);
+    ASSERT_EQ(s.filled_ids.size(), 1u);      // only our real fill; the markout is not routed here
+    EXPECT_EQ(s.filled_ids[0], 42u);
+}
